@@ -720,21 +720,135 @@ struct RangeForm<'a> {
     mask: &'a str,
     router: &'a str,
     dns: &'a str,
-    lease: &'a str,
+    /// (número, unidade), como no formulário.
+    lease: (&'a str, &'a str),
     extra: &'a [(String, String)],
     err: Option<&'a str>,
+}
+
+// ---------- campos de rede (máscara/prefixo, tempo de lease) ----------
+
+/// Unidades do tempo de lease: (valor do select, segundos, rótulo).
+const LEASE_UNITS: [(&str, u64, &str); 4] =
+    [("s", 1, n_("segundos")), ("min", 60, n_("minutos")), ("h", 3600, n_("horas")), ("d", 86400, n_("dias"))];
+
+/// Segundos do .ini → (número, unidade) na maior unidade exata. Vazio fica vazio.
+fn split_lease(secs: &str) -> (String, &'static str) {
+    match secs.trim().parse::<u64>() {
+        Ok(0) => ("0".into(), "h"),
+        Ok(n) => {
+            let (unit, mult) = LEASE_UNITS.iter().rev().map(|(u, m, _)| (*u, *m)).find(|(_, m)| n % m == 0).unwrap_or(("s", 1));
+            ((n / mult).to_string(), unit)
+        }
+        Err(_) => (secs.trim().to_string(), "s"),
+    }
+}
+
+/// (número, unidade) do formulário → segundos para o .ini. Se não for um número válido,
+/// devolve o texto digitado para a validação recusar mostrando o que a pessoa escreveu.
+fn lease_from_form(f: &Fields) -> String {
+    let v = field(f, "lease_value").trim();
+    if v.is_empty() {
+        return String::new();
+    }
+    let unit = field(f, "lease_unit");
+    let mult = LEASE_UNITS.iter().find(|(u, ..)| *u == unit).map(|(_, m, _)| *m).unwrap_or(1);
+    match v.parse::<u64>().ok().and_then(|n| n.checked_mul(mult)).filter(|s| *s <= u64::from(u32::MAX)) {
+        Some(s) => s.to_string(),
+        None => format!("{v} {unit}"),
+    }
+}
+
+/// Máscara do formulário: a digitada ou, sem ela, a do prefixo escolhido.
+fn mask_from_form(f: &Fields) -> String {
+    let m = field(f, "mask").trim();
+    if !m.is_empty() {
+        return m.to_string();
+    }
+    field(f, "prefix").trim().parse::<u8>().ok().filter(|p| (1..=32).contains(p)).map(|p| dhcp::mask_of(p).to_string()).unwrap_or_default()
+}
+
+fn hosts_of(prefix: u8) -> u64 {
+    match prefix {
+        32 => 1,
+        31 => 2,
+        p => (1u64 << (32 - u32::from(p))) - 2,
+    }
+}
+
+/// Máscara com o seletor de prefixo (/8 a /32) ao lado; o app.js mantém os dois iguais.
+fn mask_field(mask: &str) -> Markup {
+    let current = mask.parse().ok().and_then(dhcp::prefix_of);
+    html! {
+        label { (t("Máscara de rede"))
+            div.input-group {
+                input.mono name="mask" value=(mask) placeholder="255.255.255.0" data-mask autocomplete="off";
+                select.prefix name="prefix" data-prefix aria-label=(t("Prefixo (CIDR)")) title=(t("Prefixo (CIDR)")) {
+                    option value="" selected[current.is_none()] { "/–" }
+                    @for p in (8..=32u8).rev() {
+                        option value=(p) selected[current == Some(p)] { "/" (p) " · " (tf!("{} IPs", hosts_of(p))) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Tempo de lease com número + unidade e atalhos.
+fn lease_field(label: &str, value: &str, unit: &str, help: &str) -> Markup {
+    let unit = if value.is_empty() { "h" } else { unit };
+    html! {
+        div.field.lease-field {
+            span.label { (label) }
+            div.input-group {
+                input.mono name="lease_value" value=(value) placeholder="10" inputmode="numeric" aria-label=(label) data-lease-value;
+                select name="lease_unit" aria-label=(t("Unidade")) data-lease-unit {
+                    @for (u, _, l) in LEASE_UNITS { option value=(u) selected[u == unit] { (t(l)) } }
+                }
+            }
+            div.chips.lease-chips {
+                button.chip type="button" data-lease-set="3600" { "1 h" }
+                button.chip type="button" data-lease-set="28800" { "8 h" }
+                button.chip type="button" data-lease-set="86400" { (t("1 dia")) }
+                button.chip type="button" data-lease-set="604800" { (tf!("{} dias", 7)) }
+                button.chip type="button" data-lease-set="0" { (t("Sem expiração")) }
+            }
+            small { (help) }
+        }
+    }
 }
 
 fn range_form(csrf: &str, rf: RangeForm) -> Markup {
     let action = match rf.n { Some(n) => format!("/ranges/{n}/edit"), None => "/ranges/new".into() };
     let fields = html! {
-        label.span2 { (t("Faixas (uma por linha)"))
-            textarea.mono name="ranges" rows="4" placeholder="192.168.0.100-192.168.0.200" required { (rf.ranges) } }
-        label { (t("Máscara de rede")) input.mono name="mask" value=(rf.mask) placeholder="255.255.255.0"; }
-        label { (t("Gateway (roteador)")) input.mono name="router" value=(rf.router) placeholder="192.168.0.1"; }
+        div.field.span2 {
+            label { (t("Faixas (uma por linha)"))
+                textarea.mono name="ranges" rows="4" placeholder="192.168.0.100-192.168.0.200" required data-ranges { (rf.ranges) } }
+            div.range-helper {
+                span.muted.small { (t("Adicionar pela quantidade:")) }
+                input.mono #rh-start placeholder="192.168.0.100" aria-label=(t("Primeiro IP")) autocomplete="off";
+                span.muted.small { "+" }
+                input #rh-count type="number" min="1" max="65534" placeholder=(t("Quantidade")) aria-label=(t("Quantidade de IPs"));
+                span.mono.small.muted #rh-end {}
+                button.btn.light.small type="button" data-add-range { (icon("plus")) (t("Adicionar faixa")) }
+            }
+            div.net-info #net-info
+                data-t-net=(t("Rede {}/{} · broadcast {} · {} IPs utilizáveis"))
+                data-t-count=(t("{} → {} IPs"))
+                data-t-total=(t("Total nas faixas: {} IPs"))
+                data-t-invalid=(t("\"{}\" não é uma faixa válida (use INÍCIO-FIM)"))
+                data-t-outside=(t("{} não cabe na rede {}/{}"))
+                data-t-edge=(t("{} inclui o endereço de rede ou o broadcast"))
+                data-t-gw-out=(t("O gateway {} está fora da rede {}/{}"))
+                data-t-gw-in=(t("O gateway {} está dentro da faixa {}"))
+                data-t-until=(t("até {}"))
+                data-t-bad-start=(t("Primeiro IP inválido"))
+                aria-live="polite" {}
+        }
+        (mask_field(rf.mask))
+        label { (t("Gateway (roteador)")) input.mono name="router" value=(rf.router) placeholder="192.168.0.1" data-router; }
         label { (t("Servidores DNS")) input.mono name="dns" value=(rf.dns) placeholder="192.168.0.1, 8.8.8.8"; }
-        label { (t("Tempo de lease (segundos)")) input.mono name="lease" value=(rf.lease) placeholder="36000" inputmode="numeric";
-            small { (t("Vazio usa o padrão das opções globais; 0 = sem expiração.")) } }
+        (lease_field(t("Tempo de lease"), rf.lease.0, rf.lease.1, t("Vazio usa o padrão das opções globais; 0 = sem expiração.")))
     };
     html! {
         (error_box(rf.err))
@@ -745,10 +859,20 @@ fn range_form(csrf: &str, rf: RangeForm) -> Markup {
     }
 }
 
-fn range_input(f: &Fields) -> RangeSetInput<'_> {
+/// Máscara e lease calculados do formulário (precisam viver enquanto o `OptionsInput` existir).
+struct NetFields {
+    mask: String,
+    lease: String,
+}
+
+fn net_fields(f: &Fields) -> NetFields {
+    NetFields { mask: mask_from_form(f), lease: lease_from_form(f) }
+}
+
+fn range_input<'a>(f: &'a Fields, nf: &'a NetFields) -> RangeSetInput<'a> {
     RangeSetInput {
         ranges: field(f, "ranges"),
-        opts: OptionsInput { mask: field(f, "mask"), router: field(f, "router"), dns: field(f, "dns"), lease: field(f, "lease") },
+        opts: OptionsInput { mask: &nf.mask, router: field(f, "router"), dns: field(f, "dns"), lease: &nf.lease },
     }
 }
 
@@ -759,7 +883,7 @@ async fn range_new(State(app): State<Shared>, ctx: Ctx) -> Response {
     };
     let form = range_form(
         &ctx.s.csrf,
-        RangeForm { n: None, rev: &loaded.rev, ranges: "", mask: "", router: "", dns: "", lease: "", extra: &[], err: None },
+        RangeForm { n: None, rev: &loaded.rev, ranges: "", mask: "", router: "", dns: "", lease: ("", "h"), extra: &[], err: None },
     );
     page(&app, &ctx, n_("Novo conjunto de faixas"), "ranges", "other", form).into_response()
 }
@@ -768,7 +892,8 @@ async fn range_save(app: Shared, ctx: Ctx, n: Option<usize>, f: Fields) -> Respo
     if let Err(r) = ctx.check_csrf(&f) {
         return r;
     }
-    let input = range_input(&f);
+    let nf = net_fields(&f);
+    let input = range_input(&f, &nf);
     let result = mutate_ini(&app, field(&f, "rev"), |doc| match n {
         Some(n) => dhcp::update_range_set(doc, n, &input),
         None => dhcp::add_range_set(doc, &input).map(|_| ()),
@@ -786,7 +911,7 @@ async fn range_save(app: Shared, ctx: Ctx, n: Option<usize>, f: Fields) -> Respo
                     mask: input.opts.mask,
                     router: input.opts.router,
                     dns: input.opts.dns,
-                    lease: input.opts.lease,
+                    lease: (field(&f, "lease_value"), field(&f, "lease_unit")),
                     extra: &[],
                     err: Some(&e),
                 },
@@ -814,6 +939,7 @@ async fn range_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<usi
         return flash(&app, &ctx, false, t("Conjunto de faixas não encontrado."), "/ranges");
     };
     let ranges = rs.ranges.join("\n");
+    let (lease_v, lease_u) = split_lease(rs.opts.lease.as_deref().unwrap_or(""));
     let form = range_form(
         &ctx.s.csrf,
         RangeForm {
@@ -823,7 +949,7 @@ async fn range_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<usi
             mask: rs.opts.mask.as_deref().unwrap_or(""),
             router: rs.opts.router.as_deref().unwrap_or(""),
             dns: rs.opts.dns.as_deref().unwrap_or(""),
-            lease: rs.opts.lease.as_deref().unwrap_or(""),
+            lease: (&lease_v, lease_u),
             extra: &rs.extra,
             err: None,
         },
@@ -843,16 +969,15 @@ async fn range_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<u
 
 // ---------- opções globais ----------
 
-fn options_form(csrf: &str, rev: &str, v: [&str; 5], extra: &[(String, String)], err: Option<&str>) -> Markup {
-    let [domain, mask, router, dns, lease] = v;
+fn options_form(csrf: &str, rev: &str, v: [&str; 4], lease: (&str, &str), extra: &[(String, String)], err: Option<&str>) -> Markup {
+    let [domain, mask, router, dns] = v;
     let fields = html! {
         p.muted.span2 { (t("Valem para todos os dispositivos, a menos que a faixa ou a reserva defina outro valor.")) }
         label { (t("Domínio")) input name="domain" value=(domain) placeholder=(t("empresa.local")); }
-        label { (t("Máscara de rede")) input.mono name="mask" value=(mask) placeholder="255.255.255.0"; }
+        (mask_field(mask))
         label { (t("Gateway (roteador)")) input.mono name="router" value=(router) placeholder="192.168.0.1"; }
         label { (t("Servidores DNS")) input.mono name="dns" value=(dns) placeholder="192.168.0.1, 8.8.8.8"; }
-        label { (t("Tempo de lease padrão (segundos)")) input.mono name="lease" value=(lease) placeholder="36000" inputmode="numeric";
-            small { (t("0 = sem expiração.")) } }
+        (lease_field(t("Tempo de lease padrão"), lease.0, lease.1, t("0 = sem expiração.")))
     };
     html! {
         (error_box(err))
@@ -867,6 +992,7 @@ async fn options_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     };
     let g = dhcp::globals(&loaded.doc);
     let o = &g.opts;
+    let (lease_v, lease_u) = split_lease(o.lease.as_deref().unwrap_or(""));
     let form = options_form(
         &ctx.s.csrf,
         &loaded.rev,
@@ -875,8 +1001,8 @@ async fn options_page(State(app): State<Shared>, ctx: Ctx) -> Response {
             o.mask.as_deref().unwrap_or(""),
             o.router.as_deref().unwrap_or(""),
             o.dns.as_deref().unwrap_or(""),
-            o.lease.as_deref().unwrap_or(""),
         ],
+        (&lease_v, lease_u),
         &g.extra,
         None,
     );
@@ -887,12 +1013,20 @@ async fn options_update(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Field
     if let Err(r) = ctx.check_csrf(&f) {
         return r;
     }
-    let opts = OptionsInput { mask: field(&f, "mask"), router: field(&f, "router"), dns: field(&f, "dns"), lease: field(&f, "lease") };
+    let nf = net_fields(&f);
+    let opts = OptionsInput { mask: &nf.mask, router: field(&f, "router"), dns: field(&f, "dns"), lease: &nf.lease };
     let domain = field(&f, "domain");
     match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_globals(doc, domain, &opts)).await {
         Ok(()) => flash(&app, &ctx, true, t("Opções globais salvas."), "/options"),
         Err(e) => {
-            let form = options_form(&ctx.s.csrf, field(&f, "rev"), [domain, opts.mask, opts.router, opts.dns, opts.lease], &[], Some(&e));
+            let form = options_form(
+                &ctx.s.csrf,
+                field(&f, "rev"),
+                [domain, opts.mask, opts.router, opts.dns],
+                (field(&f, "lease_value"), field(&f, "lease_unit")),
+                &[],
+                Some(&e),
+            );
             (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Opções globais"), "options", "other", form)).into_response()
         }
     }
@@ -1008,5 +1142,37 @@ async fn dismiss_note(State(app): State<Shared>, ctx: Ctx, headers: axum::http::
         StatusCode::NO_CONTENT.into_response()
     } else {
         Redirect::to("/").into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn form(pairs: &[(&str, &str)]) -> Fields {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn tempo_de_lease_em_unidades() {
+        assert_eq!(split_lease("36000"), ("10".to_string(), "h"));
+        assert_eq!(split_lease("604800"), ("7".to_string(), "d"));
+        assert_eq!(split_lease("90"), ("90".to_string(), "s"));
+        assert_eq!(split_lease("0"), ("0".to_string(), "h"));
+        assert_eq!(split_lease(""), (String::new(), "s"));
+        assert_eq!(lease_from_form(&form(&[("lease_value", "8"), ("lease_unit", "h")])), "28800");
+        assert_eq!(lease_from_form(&form(&[("lease_value", " 2 "), ("lease_unit", "d")])), "172800");
+        assert_eq!(lease_from_form(&form(&[("lease_value", "")])), "");
+        assert_eq!(lease_from_form(&form(&[("lease_value", "99999999"), ("lease_unit", "d")])), "99999999 d", "acima do limite do .ini");
+        assert_eq!(lease_from_form(&form(&[("lease_value", "x"), ("lease_unit", "min")])), "x min");
+    }
+
+    #[test]
+    fn mascara_vem_do_prefixo_quando_vazia() {
+        assert_eq!(mask_from_form(&form(&[("mask", ""), ("prefix", "26")])), "255.255.255.192");
+        assert_eq!(mask_from_form(&form(&[("mask", "255.255.0.0"), ("prefix", "26")])), "255.255.0.0");
+        assert_eq!(mask_from_form(&form(&[("mask", ""), ("prefix", "99")])), "");
+        assert_eq!(hosts_of(24), 254);
+        assert_eq!(hosts_of(31), 2);
     }
 }

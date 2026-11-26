@@ -21,7 +21,7 @@ Rust. É um programa separado: **o servidor DHCP (`opendhcpd`) não muda**. O pa
 | Atividade | Feed ao vivo do log do servidor: IP entregue, renovação, oferta, liberação, conflito, recusa, pedido sem faixa; filtros por tipo e texto |
 | Leases ativos | Dispositivos com IP agora, com destaque para os **novos** e **renovados**; **Fixar IP** (vira reserva) e **Liberar** |
 | Reservas | IP fixo por MAC (`[00:11:22:33:44:55]` + `IP=`), nome do host, bloqueio de dispositivo, se está com IP agora |
-| Faixas | `[RANGE_SET]`: faixas `DHCPRange`, máscara, gateway, DNS e tempo de lease, com a ocupação de cada faixa |
+| Faixas | `[RANGE_SET]`: faixas `DHCPRange`, máscara, gateway, DNS e tempo de lease, com a ocupação de cada faixa. Máscara por prefixo (/8 a /32), faixa pelo primeiro IP + quantidade, rede/broadcast/IPs utilizáveis calculados ao digitar, lease em minutos/horas/dias |
 | Opções globais | `[GLOBAL_OPTIONS]`: domínio, máscara, gateway, DNS e lease padrão |
 | Minha conta | Troca o usuário e a senha do painel (grava o novo hash no `panel.toml` e encerra as outras sessões) |
 
