@@ -1,0 +1,32 @@
+[package]
+name = "opendhcp-panel"
+version = "0.1.0"
+edition = "2021"
+description = "Painel web de administração para o Open DHCP Server"
+license = "GPL-2.0-only"
+publish = false
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+maud = { version = "0.27", features = ["axum"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "process", "fs", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true

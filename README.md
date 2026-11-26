@@ -16,3 +16,10 @@ Although it has most of the features and capabilities required for use by expert
 - Multiple ways to assign option values like strings, IPs, hex strings or byte arrays. 
 - Lease Status is displayed on auto refreshing html page. 
 - Low CPU and executable size, requiring very little memory. 
+
+## Web admin panel (`panel/`)
+
+A separate, optional web panel written in Rust: live monitoring of leases, server events and
+range usage, plus editing of reservations, ranges and global options in `opendhcp.ini`, and
+start/stop/restart of the service. The DHCP server itself is unchanged. See
+[panel/README.md](panel/README.md) (in Portuguese).

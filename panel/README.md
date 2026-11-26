@@ -1,0 +1,93 @@
+# opendhcp-panel
+
+Painel web de administração e monitoramento em tempo real para o Open DHCP Server, escrito em
+Rust. É um programa separado: **o servidor DHCP (`opendhcpd`) não muda**. O painel:
+
+- mostra **ao vivo** (Server-Sent Events, sem recarregar a página) os dispositivos com IP, a
+  ocupação das faixas, o estado do serviço e os eventos do servidor;
+- edita o `opendhcp.ini` (reservas, faixas e opções globais), **preservando comentários e a ordem**
+  do arquivo e fazendo backup antes de cada gravação;
+- inicia, para e reinicia o serviço por comandos configuráveis (por padrão `systemctl`).
+
+![Visão geral](docs/visao-geral.jpg)
+
+![Leases ativos no tema escuro](docs/leases-escuro.jpg)
+
+## Telas
+
+| Tela | O que faz |
+|---|---|
+| Visão geral | Cartão do serviço (Iniciar/Parar/Reiniciar), indicadores, gráfico de eventos das últimas 2 h, uso das faixas, ocupação geral e atividade recente |
+| Atividade | Feed ao vivo do log do servidor: IP entregue, renovação, oferta, liberação, conflito, recusa, pedido sem faixa; filtros por tipo e texto |
+| Leases ativos | Dispositivos com IP agora, com destaque para os **novos** e **renovados**; **Fixar IP** (vira reserva) e **Liberar** |
+| Reservas | IP fixo por MAC (`[00:11:22:33:44:55]` + `IP=`), nome do host, bloqueio de dispositivo, se está com IP agora |
+| Faixas | `[RANGE_SET]`: faixas `DHCPRange`, máscara, gateway, DNS e tempo de lease, com a ocupação de cada faixa |
+| Opções globais | `[GLOBAL_OPTIONS]`: domínio, máscara, gateway, DNS e lease padrão |
+| Minha conta | Troca o usuário e a senha do painel (grava o novo hash no `panel.toml` e encerra as outras sessões) |
+
+**Alertas** no topo de todas as telas: serviço parado, faixa com 80%/90% ocupada, pedidos de IP
+sem faixa correspondente (dispositivos sem rede) e conflitos de IP nos últimos 15 minutos.
+
+Opções que o painel não edita (filtros, opções numéricas, PXE etc.) aparecem como "outras
+opções" e são mantidas no arquivo exatamente como estão. O servidor só lê o `.ini` ao iniciar,
+então alterações valem depois de **Reiniciar** (o painel mostra um aviso com o botão). Os leases
+ativos não se perdem: o servidor os grava no arquivo de estado e relê ao subir.
+
+## Como o tempo real funciona
+
+Um monitor no painel confere a cada segundo:
+
+- o **arquivo de estado** (`-s`), que o servidor regrava a cada IP entregue ou renovado;
+- o **log** (`-l`, com `%Y%m%d`): lê só as linhas novas, troca de arquivo na virada do dia e, ao
+  iniciar, carrega o fim do log de hoje e de ontem para o histórico;
+- o **estado do serviço** (a cada 3 s).
+
+Quando algo muda, cada navegador conectado em `/live` recebe só os blocos da página aberta,
+já renderizados (e escapados) no servidor. Se a conexão cair, a página tenta de novo sozinha e
+volta para o login se a sessão tiver expirado.
+
+## Instalação
+
+```sh
+cargo build --release
+sudo install -m 755 target/release/opendhcp-panel /usr/local/bin/
+sudo mkdir -p /etc/opendhcp-panel
+sudo cp panel.example.toml /etc/opendhcp-panel/panel.toml
+echo admin | opendhcp-panel hash-password   # cole o hash em [auth] password_hash
+sudo cp opendhcp.service opendhcp-panel.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opendhcp opendhcp-panel
+```
+
+Ajuste em `panel.toml` os caminhos `ini_file`, `state_file` e `log_file` para os mesmos usados no
+`opendhcpd` (`-i`, `-s` e `-l`). O painel abre em `http://127.0.0.1:8067`.
+Com a senha de fábrica `admin`, todas as telas mostram um aviso até ela ser trocada em
+**Minha conta**.
+
+## Segurança
+
+- Login com senha em hash Argon2; sessão em cookie `HttpOnly` + `SameSite=Strict`; token CSRF em
+  todo formulário; bloqueio de 5 minutos após 5 senhas erradas pelo mesmo IP.
+- Tudo o que vem dos dispositivos (nome do host no log e no arquivo de estado) é escapado no HTML;
+  CSP sem script nem estilo inline.
+- Entradas são validadas (MAC, IPv4, máscara, faixas sem sobreposição, limite de 125 faixas) e
+  valores com quebra de linha são recusados, para não injetar seções no `.ini`.
+- Se o `.ini` mudar entre abrir e salvar um formulário, a gravação é recusada (sem sobrescrever
+  a alteração de outra pessoa).
+- Ouve só em `127.0.0.1` por padrão. Para acesso remoto, use um proxy com HTTPS e
+  `secure_cookie = true`. Não exponha o painel sem TLS na mesma rede dos dispositivos.
+
+## Desenvolvimento
+
+```sh
+cargo test     # INI, arquivo de estado (struct data8, 104 bytes), log, monitor, alertas, login
+cargo run -- serve -c panel.toml
+```
+
+Para testar sem root/DHCP real, aponte os comandos de `[service]` para um script que simule o
+serviço e use uma cópia do `opendhcp.ini`; um script que escreva linhas no log e regrave o
+arquivo de estado (no formato acima) faz a tela se mexer como num servidor de verdade.
+
+Limitações atuais: o layout do arquivo de estado é o do Linux 64 bits (x86_64/aarch64); o painel
+não edita `[LISTEN_ON]`, `[REPLICATION_SERVERS]` nem filtros de faixa; o histórico de eventos
+fica em memória (os últimos 2000).
