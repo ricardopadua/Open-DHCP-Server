@@ -207,6 +207,8 @@ pub static TABLE: &[[&str; 4]] = &[
 
     // ---------- formulários ----------
     ["Cancelar", "Cancel", "Annuler", "Cancelar"],
+    ["Confirmar", "Confirm", "Confirmer", "Confirmar"],
+    ["Confirmar ação", "Confirm action", "Confirmer l'action", "Confirmar acción"],
     ["Salvar", "Save", "Enregistrer", "Guardar"],
     ["Editar", "Edit", "Modifier", "Editar"],
     ["Formulário expirado; recarregue a página.", "Form expired; reload the page.", "Formulaire expiré ; rechargez la page.", "Formulario caducado; recargue la página."],

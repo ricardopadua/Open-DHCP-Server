@@ -356,6 +356,26 @@ const NAV: [(&str, &[NavItem]); 3] = [
     ]),
 ];
 
+/// Janela de confirmação dos formulários com `data-confirm` (o app.js preenche a mensagem e o
+/// botão de confirmar com o texto do botão que enviou o formulário).
+fn confirm_modal() -> Markup {
+    html! {
+        div.modal-backdrop #confirm-modal hidden {
+            div.modal role="alertdialog" aria-modal="true" aria-labelledby="confirm-text" {
+                div.modal-icon { (icon("alert")) }
+                div.modal-body {
+                    h3 { (t("Confirmar ação")) }
+                    p #confirm-text {}
+                }
+                div.modal-actions {
+                    button.btn.light type="button" data-act="cancel" { (t("Cancelar")) }
+                    button.btn.primary type="button" data-act="ok" { (t("Confirmar")) }
+                }
+            }
+        }
+    }
+}
+
 /// Seletor de idioma (link GET que grava o cookie e volta para `here`).
 fn lang_menu(here: &str) -> Markup {
     let cur = i18n::lang();
@@ -398,6 +418,7 @@ pub fn shell(s: Shell, snap: &Snapshot, body: Markup) -> Markup {
                 script src="/static/app.js" defer {}
             }
             body data-live=(s.live) {
+                (confirm_modal())
                 div.shell {
                     aside.side #side {
                         a.brand href="/" {
