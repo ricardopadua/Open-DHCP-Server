@@ -17,8 +17,6 @@ server (`opendhcpd`) unchanged and adds a modern way to run and manage it:
 - **Notifications** that can be dismissed, an on-disk history, Portuguese/English/French/Spanish,
   light and dark themes, and a mobile-friendly layout.
 
-![Overview](panel/docs/visao-geral.jpg)
-
 ## Download
 
 Get the latest version from [Releases](https://github.com/ricardopadua/Open-DHCP-Server/releases/latest):
