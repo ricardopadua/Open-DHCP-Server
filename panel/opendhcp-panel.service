@@ -1,0 +1,17 @@
+# Unit do painel web.
+[Unit]
+Description=Painel web do Open DHCP Server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/opendhcp-panel serve -c /etc/opendhcp-panel/panel.toml
+# Precisa gravar o .ini, o arquivo de estado e chamar systemctl para a unit opendhcp.
+User=root
+StateDirectory=opendhcp-panel
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=false
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

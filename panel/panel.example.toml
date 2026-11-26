@@ -1,0 +1,33 @@
+# Configuração do opendhcp-panel. Copie para /etc/opendhcp-panel/panel.toml.
+
+# Só local por padrão. Para acessar pela rede, deixe 127.0.0.1 e publique por um proxy
+# com HTTPS (nginx, Caddy) e marque secure_cookie = true.
+listen = "127.0.0.1:8067"
+secure_cookie = false
+session_hours = 8
+
+# Os mesmos arquivos passados ao servidor: opendhcpd -i <ini_file> -s <state_file>
+ini_file = "/opt/opendhcp/opendhcp.ini"
+state_file = "/tmp/opendhcp.state"
+
+# Log do servidor (-l), com o mesmo padrão de data. Alimenta a tela Atividade, o gráfico e os
+# alertas. Com LogLevel=Normal o servidor registra IPs entregues, renovações e liberações; com
+# LogLevel=All, também as ofertas. Sem esta linha, leases e serviço continuam ao vivo.
+log_file = "/opt/opendhcp/log/opendhcp%Y%m%d.log"
+
+# Cópia do .ini antes de cada alteração (mantém as 30 mais novas).
+backup_dir = "/var/lib/opendhcp-panel/backups"
+backups_keep = 30
+
+[auth]
+username = "admin"
+# Gere com: opendhcp-panel hash-password
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$TROQUE$TROQUE"
+
+# Comandos (sem shell) para controlar o serviço. "status" deve sair com 0 quando ativo.
+# Padrão: systemctl com a unit "opendhcp" (veja opendhcp.service).
+[service]
+status  = ["systemctl", "is-active", "--quiet", "opendhcp"]
+start   = ["systemctl", "start", "opendhcp"]
+stop    = ["systemctl", "stop", "opendhcp"]
+restart = ["systemctl", "restart", "opendhcp"]

@@ -1,0 +1,13 @@
+# Unit do servidor DHCP (o painel controla esta unit).
+[Unit]
+Description=Open DHCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=/opt/opendhcp/opendhcpd -i /opt/opendhcp/opendhcp.ini -s /tmp/opendhcp.state -l /opt/opendhcp/log/opendhcp%%Y%%m%%d.log
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
