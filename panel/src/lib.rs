@@ -25,9 +25,36 @@ mod web;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 
 pub use auth::hash_password;
+
+/// `opendhcp.ini` padrão do Open DHCP Server (o mesmo do projeto), usado quando o arquivo ainda
+/// não existe.
+pub const DEFAULT_INI: &str = include_str!("../../opendhcp.ini");
+
+/// O `ini_file` configurado não existe e não deu para criá-lo (ex.: pasta só do root).
+#[derive(Debug)]
+pub struct MissingIni {
+    pub path: PathBuf,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for MissingIni {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "não consegui criar {}: {}", self.path.display(), self.error)
+    }
+}
+
+impl std::error::Error for MissingIni {}
+
+/// Cria o `.ini` com a configuração padrão (e a pasta dele).
+pub fn create_default_ini(path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, DEFAULT_INI)
+}
 
 /// Painel pronto para atender: configuração lida, histórico e monitor iniciados, porta aberta.
 pub struct Server {
@@ -52,7 +79,11 @@ impl Server {
 pub async fn start(path: PathBuf) -> anyhow::Result<Server> {
     let cfg = config::Config::load(&path)?;
     if !cfg.ini_file.exists() {
-        bail!("ini_file não existe: {}", cfg.ini_file.display());
+        // Primeira vez: cria com a configuração padrão (ajustável depois pelo painel).
+        match create_default_ini(&cfg.ini_file) {
+            Ok(()) => tracing::info!(file = %cfg.ini_file.display(), "opendhcp.ini não existia; criado com a configuração padrão"),
+            Err(error) => return Err(MissingIni { path: cfg.ini_file.clone(), error }.into()),
+        }
     }
     let listen = cfg.listen;
     if !listen.ip().is_loopback() && !cfg.secure_cookie {

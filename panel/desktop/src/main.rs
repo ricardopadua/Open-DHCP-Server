@@ -31,8 +31,16 @@ enum Target {
     Url(String),
     /// Painel do serviço instalado, mas parado.
     Offline(String),
+    /// O opendhcp.ini não existe e criar exige permissão de administrador.
+    MissingIni { ini: PathBuf, config: PathBuf },
     /// Não deu para iniciar o painel embutido.
     Failed { error: String, config: PathBuf },
+}
+
+/// Por que o painel embutido não subiu.
+enum StartError {
+    MissingIni(PathBuf),
+    Other(String),
 }
 
 enum UserEvent {
@@ -42,6 +50,8 @@ enum UserEvent {
     Reachable(String, bool),
     /// Arquivo baixado (ex.: exportar CSV).
     Downloaded(PathBuf),
+    /// Resultado de criar o .ini e subir o painel embutido de novo.
+    Embedded(Result<String, String>),
 }
 
 // ---------- textos da própria janela (o painel tem a tradução dele) ----------
@@ -89,6 +99,26 @@ fn tr(key: &str) -> &'static str {
             "Ajuste las rutas del servidor DHCP en este archivo y vuelva a abrir Open DHCP:",
         ],
         "open_config" => ["Abrir a configuração", "Open the configuration", "Ouvrir la configuration", "Abrir la configuración"],
+        "missing_title" => [
+            "Falta o arquivo de configuração do servidor DHCP",
+            "The DHCP server configuration file is missing",
+            "Le fichier de configuration du serveur DHCP est absent",
+            "Falta el archivo de configuración del servidor DHCP",
+        ],
+        "missing_text" => [
+            "O opendhcp.ini não existe nesta pasta. Posso criá-lo com a configuração padrão do Open DHCP (você ajusta faixas e opções depois, pelo painel). A pasta é do sistema, então será pedida a senha de administrador.",
+            "opendhcp.ini does not exist in this folder. I can create it with the Open DHCP default configuration (you adjust ranges and options later in the panel). The folder belongs to the system, so the administrator password will be requested.",
+            "opendhcp.ini n'existe pas dans ce dossier. Je peux le créer avec la configuration par défaut d'Open DHCP (vous ajusterez plages et options ensuite dans le panneau). Le dossier appartient au système : le mot de passe administrateur sera demandé.",
+            "opendhcp.ini no existe en esta carpeta. Puedo crearlo con la configuración predeterminada de Open DHCP (después ajusta rangos y opciones en el panel). La carpeta es del sistema, así que se pedirá la contraseña de administrador.",
+        ],
+        "create" => ["Criar o arquivo", "Create the file", "Créer le fichier", "Crear el archivo"],
+        "creating" => ["Criando…", "Creating…", "Création…", "Creando…"],
+        "create_failed" => [
+            "Não foi possível criar o arquivo:",
+            "Could not create the file:",
+            "Impossible de créer le fichier :",
+            "No se pudo crear el archivo:",
+        ],
         "saved" => ["Arquivo salvo em", "File saved to", "Fichier enregistré dans", "Archivo guardado en"],
         _ => [""; 4],
     };
@@ -126,14 +156,15 @@ button.primary {{ background:#845adf; color:#fff; }}
 button.light {{ background:transparent; border-color:#c9cdd6; color:inherit; }}
 button:disabled {{ opacity:.6; cursor:wait; }}
 #msg {{ margin-top:1rem; font-size:.85rem; color:#e6533c; }}
-</style></head><body><div class="card"><div class="logo">⌔</div><h1>{}</h1><p>{}</p><code>{}</code>
+</style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 18h.01M9.17 15.17a4 4 0 0 1 5.66 0M6.34 12.34a8 8 0 0 1 11.31 0M3.51 9.51a12 12 0 0 1 16.97 0"/></svg></div><h1>{}</h1><p>{}</p><code>{}</code>
 <div class="actions">{buttons}</div><div id="msg"></div></div>
-<script>function go(a, b) {{ if (a === 'start') {{ b.disabled = true; b.textContent = {}; }} window.ipc.postMessage(a); }}</script>
+<script>function go(a, b) {{ if (a === 'start' || a === 'create') {{ b.disabled = true; b.textContent = a === 'start' ? {} : {}; }} window.ipc.postMessage(a); }}</script>
 </body></html>"#,
         esc(title),
         esc(text),
         esc(detail),
         serde_quote(tr("starting")),
+        serde_quote(tr("creating")),
     )
 }
 
@@ -228,14 +259,14 @@ log_file = 'C:\OpenDHCPServer\log\OpenDHCPServer%Y%m%d.log'"
 }
 
 /// Sobe o painel dentro do aplicativo, numa porta livre de 127.0.0.1.
-fn start_embedded(config: &Path) -> Result<String, String> {
+fn start_embedded(config: &Path) -> Result<String, StartError> {
     let (tx, rx) = mpsc::channel();
     let config = config.to_path_buf();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
-                let _ = tx.send(Err(e.to_string()));
+                let _ = tx.send(Err(StartError::Other(e.to_string())));
                 return;
             }
         };
@@ -248,12 +279,33 @@ fn start_embedded(config: &Path) -> Result<String, String> {
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(format!("{e:#}")));
+                    let err = match e.downcast_ref::<opendhcp_panel::MissingIni>() {
+                        Some(m) if m.error.kind() == std::io::ErrorKind::PermissionDenied => StartError::MissingIni(m.path.clone()),
+                        _ => StartError::Other(format!("{e:#}")),
+                    };
+                    let _ = tx.send(Err(err));
                 }
             }
         });
     });
-    rx.recv_timeout(Duration::from_secs(30)).map_err(|e| e.to_string())?
+    rx.recv_timeout(Duration::from_secs(30)).map_err(|e| StartError::Other(e.to_string()))?
+}
+
+/// Cria o opendhcp.ini numa pasta do sistema, pedindo a senha de administrador (polkit).
+fn create_ini_as_admin(ini: &Path) -> Result<(), String> {
+    let tmp = std::env::temp_dir().join(format!("opendhcp-{}.ini", std::process::id()));
+    std::fs::write(&tmp, opendhcp_panel::DEFAULT_INI).map_err(|e| e.to_string())?;
+    let status = std::process::Command::new("pkexec")
+        .args(["install", "-D", "-m", "644"])
+        .arg(&tmp)
+        .arg(ini)
+        .status();
+    let _ = std::fs::remove_file(&tmp);
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("pkexec: {s}")),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn resolve() -> Target {
@@ -272,7 +324,8 @@ fn resolve() -> Target {
     };
     match start_embedded(&config) {
         Ok(url) => Target::Url(url),
-        Err(error) => Target::Failed { error, config },
+        Err(StartError::MissingIni(ini)) => Target::MissingIni { ini, config },
+        Err(StartError::Other(error)) => Target::Failed { error, config },
     }
 }
 
@@ -312,6 +365,7 @@ fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEve
     builder = match target {
         Target::Url(url) => builder.with_url(url),
         Target::Offline(url) => builder.with_html(offline_html(url)),
+        Target::MissingIni { ini, .. } => builder.with_html(missing_html(ini)),
         Target::Failed { error, config } => builder.with_html(failed_html(error, config)),
     };
     #[cfg(target_os = "linux")]
@@ -330,6 +384,15 @@ fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEve
 fn offline_html(url: &str) -> String {
     let start = if cfg!(unix) { vec![("start", tr("start"), true), ("retry", tr("retry"), false)] } else { vec![("retry", tr("retry"), true)] };
     notice_page(tr("offline_title"), tr("offline_text"), url, &start)
+}
+
+fn missing_html(ini: &Path) -> String {
+    notice_page(
+        tr("missing_title"),
+        tr("missing_text"),
+        &ini.display().to_string(),
+        &[("create", tr("create"), true), ("open_config", tr("open_config"), false)],
+    )
 }
 
 fn failed_html(error: &str, config: &Path) -> String {
@@ -377,7 +440,11 @@ fn main() {
         _ => None,
     };
     let failed_config = match &target {
-        Target::Failed { config, .. } => Some(config.clone()),
+        Target::Failed { config, .. } | Target::MissingIni { config, .. } => Some(config.clone()),
+        _ => None,
+    };
+    let missing_ini = match &target {
+        Target::MissingIni { ini, .. } => Some(ini.clone()),
         _ => None,
     };
 
@@ -398,6 +465,20 @@ fn main() {
                         wait_reachable(url.clone(), proxy.clone());
                     }
                 }
+                "create" => {
+                    if let (Some(ini), Some(config)) = (missing_ini.clone(), failed_config.clone()) {
+                        let proxy = proxy.clone();
+                        std::thread::spawn(move || {
+                            let result = create_ini_as_admin(&ini).and_then(|_| {
+                                start_embedded(&config).map_err(|e| match e {
+                                    StartError::MissingIni(p) => p.display().to_string(),
+                                    StartError::Other(s) => s,
+                                })
+                            });
+                            let _ = proxy.send_event(UserEvent::Embedded(result));
+                        });
+                    }
+                }
                 "open_config" => {
                     if let Some(c) = &failed_config {
                         open_path(c);
@@ -410,6 +491,15 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Reachable(_, false)) => {
                 let msg = serde_quote(tr("still_off"));
+                let _ = webview.evaluate_script(&format!(
+                    "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => b.disabled = false);"
+                ));
+            }
+            Event::UserEvent(UserEvent::Embedded(Ok(url))) => {
+                let _ = webview.load_url(&url);
+            }
+            Event::UserEvent(UserEvent::Embedded(Err(e))) => {
+                let msg = serde_quote(&format!("{} {e}", tr("create_failed")));
                 let _ = webview.evaluate_script(&format!(
                     "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => b.disabled = false);"
                 ));
