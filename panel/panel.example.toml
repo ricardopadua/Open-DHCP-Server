@@ -1,16 +1,10 @@
 # Configuração do opendhcp-panel. Copie para /etc/opendhcp-panel/panel.toml.
 
-# Só local por padrão. Para acessar pela rede, deixe 127.0.0.1 e publique por um proxy
-# com HTTPS (nginx, Caddy) e marque secure_cookie = true.
+# Só deste computador: o painel recusa endereços que não sejam 127.0.0.1 ou [::1] e não aceita
+# acesso de outro computador (nem por proxy).
 listen = "127.0.0.1:8067"
 secure_cookie = false
 session_hours = 8
-
-# Nomes aceitos no cabeçalho Host além de 127.0.0.1/localhost na porta acima (proteção contra
-# DNS rebinding). Atrás de um proxy, ponha aqui o nome publicado, ex.: ["painel.minharede.lan"].
-allowed_hosts = []
-# Proxies reversos confiáveis, dos quais o painel aceita o IP real em X-Forwarded-For.
-trusted_proxies = []
 
 # Os mesmos arquivos passados ao servidor: opendhcpd -i <ini_file> -s <state_file>
 ini_file = "/opt/opendhcp/opendhcp.ini"

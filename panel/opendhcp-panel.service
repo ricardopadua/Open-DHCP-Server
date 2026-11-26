@@ -5,9 +5,11 @@ After=network-online.target
 
 [Service]
 ExecStart=/usr/bin/opendhcp-panel serve -c /etc/opendhcp-panel/panel.toml
-# Precisa gravar o .ini, o arquivo de estado, a própria configuração (troca de senha) e chamar
-# systemctl para a unit opendhcp; nenhum poder extra de root além disso.
-User=root
+# Usuário próprio, sem root. Grava o .ini e o estado dos leases (grupo opendhcp-panel), a própria
+# configuração e os próprios dados; iniciar/parar o servidor DHCP e a desinstalação passam pela
+# regra do polkit 50-opendhcp-panel.rules.
+User=opendhcp-panel
+Group=opendhcp-panel
 StateDirectory=opendhcp-panel
 StateDirectoryMode=0700
 UMask=0077

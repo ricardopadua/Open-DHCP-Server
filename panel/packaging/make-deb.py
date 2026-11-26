@@ -22,7 +22,7 @@ Architecture: amd64
 Maintainer: Open DHCP Server fork <noreply@github.com>
 Section: net
 Priority: optional
-Depends: libc6, libgtk-3-0, libwebkit2gtk-4.1-0
+Depends: libc6, libgtk-3-0, libwebkit2gtk-4.1-0, polkitd | policykit-1
 Homepage: https://github.com/ricardopadua/Open-DHCP-Server
 Description: Open DHCP Server with a web panel and a desktop app
  opendhcpd (Open DHCP Server, 64-bit build), the opendhcp-panel service

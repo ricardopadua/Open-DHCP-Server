@@ -98,7 +98,8 @@ Em **Sistema → Manutenção**, com a senha atual:
   Apelidos, histórico e backups ficam.
 - **Desinstalar:** no serviço instalado pelo aplicativo (AppImage) ou pelo `install.sh`, remove o
   servidor, o painel, o aplicativo e as units, opcionalmente também a configuração, os leases e os
-  backups. A remoção roda numa unit transitória (`systemd-run`), fora do isolamento do painel.
+  backups. A remoção roda como root na unit `opendhcp-uninstall@`, que o painel (sem root) só
+  pode iniciar pela regra do polkit.
   Instalado por `.deb`/`.rpm`, a página mostra o comando do gerenciador de pacotes.
 
 ## Instalação manual
@@ -124,12 +125,17 @@ Com a senha de fábrica `admin`, todas as telas mostram um aviso até ela ser tr
 - **Login:** senha em hash Argon2id; sessão em cookie `HttpOnly` + `SameSite=Strict`, trocada a
   cada login e depois de mudar a senha; token CSRF em todo formulário.
 - **Senha padrão:** com `admin`, o painel só deixa abrir **Minha conta** até ela ser trocada.
-- **Tentativas:** bloqueio de 5 minutos após 5 senhas erradas pelo mesmo IP, contando um login
-  por vez (tentativas em paralelo não escapam do limite). Atrás de um proxy, liste-o em
-  `trusted_proxies` para valer o IP real do cliente.
-- **DNS rebinding:** só são aceitos pedidos com `Host` de endereço IP, `localhost` ou um dos
-  `allowed_hosts`, e POST só da mesma origem; uma página da internet não consegue falar com o
-  painel local.
+- **Só local:** o painel ouve só em `127.0.0.1` (ou `[::1]`) e recusa iniciar com outro
+  endereço; não há acesso de outro computador, nem por proxy (`allowed_hosts` e
+  `trusted_proxies` são ignorados).
+- **Tentativas:** bloqueio de 5 minutos após 5 senhas erradas, contando um login por vez
+  (tentativas em paralelo não escapam do limite).
+- **DNS rebinding:** só são aceitos pedidos com `Host` de loopback (`localhost`, `127.0.0.1`,
+  `[::1]`) e POST só da mesma origem; uma página da internet não consegue falar com o painel.
+- **Sem root:** o painel roda com o usuário `opendhcp-panel`. Ele grava o `opendhcp.ini` e o
+  estado dos leases pelo grupo, mas não as pastas do root (não troca binários nem cria
+  arquivos nelas). Pelo systemd, a regra do polkit `50-opendhcp-panel.rules` só o deixa
+  iniciar, parar e reiniciar o `opendhcp.service` e pedir a própria desinstalação.
 - **Injeção:** tudo o que vem dos dispositivos é escapado no HTML; CSP sem script nem estilo
   inline; entradas validadas (MAC, IPv4, máscara, faixas, nomes) e valores com quebra de linha
   recusados, para não injetar seções no `.ini`; CSV exportado protegido contra fórmulas.
@@ -142,8 +148,6 @@ Com a senha de fábrica `admin`, todas as telas mostram um aviso até ela ser tr
   aleatória; ações internas só valem na tela de aviso local, e a janela não navega para fora do
   painel.
 - Se o `.ini` mudar entre abrir e salvar um formulário, a gravação é recusada.
-- Ouve só em `127.0.0.1` por padrão. Para acesso remoto, use um proxy com HTTPS,
-  `secure_cookie = true` (liga também o HSTS) e o nome publicado em `allowed_hosts`.
 
 ## Traduções
 

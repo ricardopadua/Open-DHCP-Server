@@ -1,7 +1,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Grava num temporário do mesmo diretório, faz fsync e renomeia por cima do original.
+/// Grava num temporário do mesmo diretório, faz fsync e renomeia por cima do original. Quando o
+/// diretório não é gravável mas o arquivo é (o painel sem root regravando o opendhcp.ini ou o
+/// estado dos leases, em pastas do root), grava no próprio arquivo.
 ///
 /// O temporário tem nome imprevisível e é criado com `create_new` (não segue nem reaproveita um
 /// link ou arquivo plantado por outro usuário) e já com a permissão do original, ou 0600 para
@@ -27,6 +29,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
                 break candidate;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && mode.is_some() => return write_in_place(path, data),
             Err(e) => return Err(e),
         }
     };
@@ -36,6 +39,26 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Abre um arquivo que já existe para regravar do zero (truncado), sem seguir link simbólico.
+pub fn open_existing_for_write(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).truncate(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW
+        opts.custom_flags(0o400000);
+    }
+    opts.open(path)
+}
+
+/// Regrava o próprio arquivo (sem temporário). Os backups do .ini são feitos antes.
+fn write_in_place(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut f = open_existing_for_write(path)?;
+    f.write_all(data)?;
+    f.sync_all()
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
@@ -100,4 +123,33 @@ pub fn backup(path: &Path, dir: &Path, keep: usize) -> std::io::Result<Option<Pa
         let _ = std::fs::remove_file(olds.remove(0));
     }
     Ok(Some(dest))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Pasta só leitura com o arquivo gravável (o painel sem root nas pastas do root): grava no
+    /// próprio arquivo. E um link simbólico no lugar do arquivo não é seguido.
+    #[test]
+    fn write_in_place_when_dir_is_read_only() {
+        let dir = std::env::temp_dir().join(format!("opendhcp-fs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("opendhcp.ini");
+        let other = dir.join("outro");
+        std::fs::write(&file, b"antes").unwrap();
+        std::fs::write(&other, b"intacto").unwrap();
+        std::os::unix::fs::symlink(&other, dir.join("link")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = write_atomic(&file, b"depois");
+        let link = write_atomic(&dir.join("link"), b"x");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        r.unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"depois");
+        assert!(link.is_err());
+        assert_eq!(std::fs::read(&other).unwrap(), b"intacto");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
