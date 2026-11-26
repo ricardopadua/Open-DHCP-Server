@@ -85,6 +85,36 @@ impl Lang {
     }
 }
 
+/// Formatos de data e hora de cada idioma (para `chrono::format`).
+#[derive(Debug, Clone, Copy)]
+pub enum DateStyle {
+    /// dia e mês com hora e minuto ("26/11 17:55", "Nov 26, 17:55")
+    Short,
+    /// com segundos
+    ShortSecs,
+    /// com ano e segundos
+    Full,
+}
+
+impl Lang {
+    /// Em inglês o mês vai por extenso abreviado, para não confundir 11/12 com 12/11.
+    pub fn date_fmt(self, style: DateStyle) -> &'static str {
+        match (self, style) {
+            (Lang::En, DateStyle::Short) => "%b %-d, %H:%M",
+            (Lang::En, DateStyle::ShortSecs) => "%b %-d, %H:%M:%S",
+            (Lang::En, DateStyle::Full) => "%b %-d, %Y %H:%M:%S",
+            (_, DateStyle::Short) => "%d/%m %H:%M",
+            (_, DateStyle::ShortSecs) => "%d/%m %H:%M:%S",
+            (_, DateStyle::Full) => "%d/%m/%Y %H:%M:%S",
+        }
+    }
+}
+
+/// Formato de data do idioma da requisição.
+pub fn date_fmt(style: DateStyle) -> &'static str {
+    lang().date_fmt(style)
+}
+
 tokio::task_local! {
     pub static LANG: Lang;
 }
@@ -214,6 +244,16 @@ mod tests {
         assert_eq!(fill("{} de {}", &[&1, &"x"]), "1 de x");
         assert_eq!(fill("{1} / {0}", &[&"a", &"b"]), "b / a");
         assert_eq!(fill("sem {chave}", &[]), "sem {chave}");
+    }
+
+    #[test]
+    fn datas_no_formato_do_idioma() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 11, 6).unwrap().and_hms_opt(17, 5, 9).unwrap();
+        assert_eq!(d.format(Lang::Pt.date_fmt(DateStyle::Short)).to_string(), "06/11 17:05");
+        assert_eq!(d.format(Lang::En.date_fmt(DateStyle::Short)).to_string(), "Nov 6, 17:05");
+        assert_eq!(d.format(Lang::En.date_fmt(DateStyle::Full)).to_string(), "Nov 6, 2026 17:05:09");
+        assert_eq!(d.format(Lang::Fr.date_fmt(DateStyle::ShortSecs)).to_string(), "06/11 17:05:09");
+        assert_eq!(LANG.sync_scope(Lang::Es, || d.format(date_fmt(DateStyle::Full)).to_string()), "06/11/2026 17:05:09");
     }
 
     #[test]

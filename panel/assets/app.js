@@ -84,6 +84,8 @@
     });
     const tog = ev.target.closest("[data-toggle=side]");
     if (tog) document.body.classList.toggle("side-open");
+    // celular: tocar fora do menu lateral aberto fecha o menu
+    else if (document.body.classList.contains("side-open") && !ev.target.closest("#side")) document.body.classList.remove("side-open");
   });
 
   // ---------- formulários de rede: máscara/prefixo, quantidade de IPs, tempo de lease ----------
