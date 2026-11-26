@@ -3,7 +3,8 @@
 [Open DHCP Server](http://dhcpserver.sourceforge.net/) is a free, open-source DHCP server by
 **Achal Dhir** (GNU GPL v2). This repository is a fork of
 [ss-plus/Open-DHCP-Server](https://github.com/ss-plus/Open-DHCP-Server) that keeps the original
-server (`opendhcpd`) unchanged and adds a modern way to run and manage it:
+server (`opendhcpd`) and its configuration, patches its security bugs and adds a modern way to
+run and manage it:
 
 - **Real-time web panel:** active leases, range usage, service status and the server log, updated
   live, plus usage over time (24 hours / 7 days).
@@ -40,49 +41,12 @@ not started automatically: review `opendhcp.ini` in the panel and press *Start*.
 
 ## Repository layout
 
-- `opendhcpd.cpp`, `opendhcpd.h`, `opendhcp.ini`: the original Open DHCP Server (unchanged).
+- `opendhcpd.cpp`, `opendhcpd.h`, `opendhcp.ini`: the original Open DHCP Server, with security
+  patches (listed in the [releases](https://github.com/ricardopadua/Open-DHCP-Server/releases)).
+- [`tests/opendhcpd/`](tests/opendhcpd/README.md): regression tests for malformed packets.
 - [`panel/`](panel/README.md): the web panel (Rust); documentation in Portuguese.
 - `panel/desktop/`: the Open DHCP desktop app.
 - `panel/packaging/`: release packaging (`build-release.sh`).
-
-## Security fixes in this fork
-
-The original `opendhcpd` (about 10 years old) had memory-safety bugs reachable by any device on
-the LAN, without authentication, in a process that runs as root. This fork fixes them in
-`opendhcpd.cpp` without changing how the server is configured or used:
-
-- **Packet parsing:**
-  - a hardware address longer than 16 bytes is rejected;
-  - options are checked against the packet size and their expected length;
-  - the reply size requested by the client is capped.
-- **Hostnames:**
-  - a single fixed-size slot per lease, so loading the state file or replication can no longer
-    overflow or free it;
-  - restricted to letters, digits, `-` and `_`, which blocks log forging and HTML in the status
-    page.
-- **Logs:** bounded writes into the log buffer (every `sprintf` became `snprintf`).
-- **HTTP status page:**
-  - listens on `127.0.0.1` by default;
-  - the allowed-client list is checked before reading the request;
-  - the request buffer is terminated correctly;
-  - the page buffer has room for its fixed footer.
-- **Leases:** `DHCPDECLINE` locks an address for one hour instead of forever, and leases received
-  through replication are capped.
-- **Files:**
-  - the state file is in `/var/lib/opendhcp` instead of `/tmp`;
-  - files are opened without following symlinks;
-  - `umask 022` instead of `0`.
-- **Build:** PIE, stack protector, full RELRO and non-executable stack. The systemd units drop
-  every root capability except binding port 67.
-
-The web panel runs as its own unprivileged user (`opendhcp-panel`) and only accepts connections
-from the same computer (`127.0.0.1`). A polkit rule lets it start, stop and restart the DHCP
-service and nothing else. Release builds fail if `cargo audit` finds a known vulnerability in
-the panel's dependencies.
-
-Replication between two servers is still not authenticated: only enable `[REPLICATION_SERVERS]`
-on a trusted network. Regression tests for malformed packets are in
-[`tests/opendhcpd/`](tests/opendhcpd/README.md).
 
 ## Credits and license
 
