@@ -34,3 +34,6 @@ icon = ["assets/icon.png"]
 category = "public.app-category.utilities"
 short_description = "Open DHCP - painel do servidor DHCP"
 long_description = "Painel do Open DHCP Server numa janela própria: monitoramento em tempo real, reservas, faixas, opções e backups."
+# O servidor DHCP e o serviço do painel vão dentro do AppImage: o aplicativo os instala no
+# sistema (com a senha de administrador) quando o servidor ainda não está instalado.
+resources = ["server/opendhcpd", "server/opendhcp-panel"]

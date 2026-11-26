@@ -31,6 +31,8 @@ enum Target {
     Url(String),
     /// Painel do serviço instalado, mas parado.
     Offline(String),
+    /// Linux sem o servidor DHCP instalado: oferecer instalar o que vem dentro do aplicativo.
+    Install { config: PathBuf },
     /// O opendhcp.ini não existe e criar exige permissão de administrador.
     MissingIni { ini: PathBuf, config: PathBuf },
     /// Não deu para iniciar o painel embutido.
@@ -52,6 +54,8 @@ enum UserEvent {
     Downloaded(PathBuf),
     /// Resultado de criar o .ini e subir o painel embutido de novo.
     Embedded(Result<String, String>),
+    /// Resultado de instalar o servidor DHCP e o serviço do painel (URL do painel do serviço).
+    Installed(Result<String, String>),
 }
 
 // ---------- textos da própria janela (o painel tem a tradução dele) ----------
@@ -112,6 +116,27 @@ fn tr(key: &str) -> &'static str {
             "opendhcp.ini no existe en esta carpeta. Puedo crearlo con la configuración predeterminada de Open DHCP (después ajusta rangos y opciones en el panel). La carpeta es del sistema, así que se pedirá la contraseña de administrador.",
         ],
         "create" => ["Criar o arquivo", "Create the file", "Créer le fichier", "Crear el archivo"],
+        "install_title" => [
+            "O servidor DHCP não está instalado",
+            "The DHCP server is not installed",
+            "Le serveur DHCP n'est pas installé",
+            "El servidor DHCP no está instalado",
+        ],
+        "install_text" => [
+            "O Open DHCP traz o servidor DHCP e o serviço do painel. Posso instalá-los neste computador (em /opt/opendhcp, com os serviços do systemd); será pedida a senha de administrador uma vez. O servidor não começa a entregar IPs sozinho: confira as faixas no painel e clique em Iniciar.",
+            "Open DHCP ships the DHCP server and the panel service. I can install them on this computer (in /opt/opendhcp, with systemd services); the administrator password will be asked once. The server does not start handing out IPs by itself: check the ranges in the panel and press Start.",
+            "Open DHCP contient le serveur DHCP et le service du panneau. Je peux les installer sur cet ordinateur (dans /opt/opendhcp, avec des services systemd) ; le mot de passe administrateur sera demandé une fois. Le serveur ne distribue pas d'adresses tout seul : vérifiez les plages dans le panneau puis cliquez sur Démarrer.",
+            "Open DHCP incluye el servidor DHCP y el servicio del panel. Puedo instalarlos en este equipo (en /opt/opendhcp, con servicios de systemd); se pedirá la contraseña de administrador una vez. El servidor no empieza a entregar IP solo: revise los rangos en el panel y pulse Iniciar.",
+        ],
+        "install" => ["Instalar o servidor DHCP", "Install the DHCP server", "Installer le serveur DHCP", "Instalar el servidor DHCP"],
+        "installing" => ["Instalando…", "Installing…", "Installation…", "Instalando…"],
+        "skip" => ["Continuar sem instalar", "Continue without installing", "Continuer sans installer", "Continuar sin instalar"],
+        "install_failed" => [
+            "A instalação não foi concluída:",
+            "The installation did not finish:",
+            "L'installation n'a pas abouti :",
+            "La instalación no terminó:",
+        ],
         "creating" => ["Criando…", "Creating…", "Création…", "Creando…"],
         "create_failed" => [
             "Não foi possível criar o arquivo:",
@@ -158,13 +183,14 @@ button:disabled {{ opacity:.6; cursor:wait; }}
 #msg {{ margin-top:1rem; font-size:.85rem; color:#e6533c; }}
 </style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 18h.01M9.17 15.17a4 4 0 0 1 5.66 0M6.34 12.34a8 8 0 0 1 11.31 0M3.51 9.51a12 12 0 0 1 16.97 0"/></svg></div><h1>{}</h1><p>{}</p><code>{}</code>
 <div class="actions">{buttons}</div><div id="msg"></div></div>
-<script>function go(a, b) {{ if (a === 'start' || a === 'create') {{ b.disabled = true; b.textContent = a === 'start' ? {} : {}; }} window.ipc.postMessage(a); }}</script>
+<script>function go(a, b) {{ if (a === 'start' || a === 'create' || a === 'install') {{ b.disabled = true; b.textContent = a === 'start' ? {} : a === 'create' ? {} : {}; }} window.ipc.postMessage(a); }}</script>
 </body></html>"#,
         esc(title),
         esc(text),
         esc(detail),
         serde_quote(tr("starting")),
         serde_quote(tr("creating")),
+        serde_quote(tr("installing")),
     )
 }
 
@@ -197,6 +223,12 @@ fn url_from_config(path: &Path) -> Option<String> {
         addr.set_ip([127, 0, 0, 1].into());
     }
     Some(format!("http://{addr}/"))
+}
+
+/// URL do painel do serviço instalado. O panel.toml do sistema é só do root (0600, tem o hash
+/// da senha): sem permissão de leitura, vale o endereço padrão do serviço.
+fn system_url() -> String {
+    url_from_config(Path::new(SYSTEM_CONFIG)).unwrap_or_else(|| "http://127.0.0.1:8067/".to_string())
 }
 
 fn reachable(url: &str) -> bool {
@@ -336,20 +368,132 @@ fn create_ini_as_admin(ini: &Path) -> Result<(), String> {
     }
 }
 
+// ---------- instalar o servidor DHCP (AppImage) ----------
+
+const UNIT_DHCP: &str = include_str!("../../opendhcp.service");
+const UNIT_PANEL: &str = include_str!("../../opendhcp-panel.service");
+const PANEL_EXAMPLE: &str = include_str!("../../panel.example.toml");
+
+/// Pasta com `opendhcpd` e `opendhcp-panel` que vêm com o aplicativo (dentro do AppImage em
+/// usr/lib/open-dhcp/server; ao lado do executável em desenvolvimento).
+fn server_payload() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join("../lib/open-dhcp/server"), dir.join("server"), dir.to_path_buf()]
+        .into_iter()
+        .find(|d| d.join("opendhcpd").is_file() && d.join("opendhcp-panel").is_file())
+}
+
+/// Marca de "continuar sem instalar" (não perguntar de novo).
+fn skip_marker() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("OpenDHCP").join("no-server-install"))
+}
+
+/// Copia os arquivos para uma pasta privada, empacota com tar e manda para um script que roda
+/// como root (pkexec). O conteúdo vai pela entrada padrão: o root não precisa ler a montagem do
+/// AppImage, que é só do usuário. Configurações que já existam não são sobrescritas.
+fn install_server(payload: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let stage = std::env::temp_dir().join(format!("open-dhcp-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    {
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o700);
+        }
+        b.create(&stage).map_err(|e| e.to_string())?;
+    }
+    let result = (|| -> Result<(), String> {
+        let put = |name: &str, data: &[u8]| std::fs::write(stage.join(name), data).map_err(|e| format!("{name}: {e}"));
+        let read = |name: &str| std::fs::read(payload.join(name)).map_err(|e| format!("{name}: {e}"));
+        put("opendhcpd", &read("opendhcpd")?)?;
+        put("opendhcp-panel", &read("opendhcp-panel")?)?;
+        put("opendhcp.service", UNIT_DHCP.as_bytes())?;
+        put("opendhcp-panel.service", UNIT_PANEL.replace("/usr/bin/opendhcp-panel", "/usr/local/bin/opendhcp-panel").as_bytes())?;
+        put("opendhcp.ini", opendhcp_panel::DEFAULT_INI.as_bytes())?;
+        let hash = opendhcp_panel::hash_password("admin").map_err(|e| e.to_string())?;
+        let toml: String = PANEL_EXAMPLE
+            .lines()
+            .map(|l| if l.starts_with("password_hash") { format!("password_hash = \"{hash}\"") } else { l.to_string() })
+            .collect::<Vec<_>>()
+            .join("\n");
+        put("panel.toml", toml.as_bytes())?;
+
+        let tar = std::process::Command::new("tar")
+            .args(["-c", "-C"])
+            .arg(&stage)
+            .arg(".")
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("tar: {e}"))?;
+        if !tar.status.success() {
+            return Err(format!("tar: {}", tar.status));
+        }
+        let script = r#"set -e
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+tar -x --no-same-owner -C "$T" -f -
+install -d -m 0755 /opt/opendhcp /opt/opendhcp/log
+install -d -m 0700 /var/lib/opendhcp /var/lib/opendhcp-panel
+install -m 0755 "$T/opendhcpd" /opt/opendhcp/opendhcpd
+install -D -m 0755 "$T/opendhcp-panel" /usr/local/bin/opendhcp-panel
+install -D -m 0644 "$T/opendhcp.service" /etc/systemd/system/opendhcp.service
+install -D -m 0644 "$T/opendhcp-panel.service" /etc/systemd/system/opendhcp-panel.service
+[ -e /opt/opendhcp/opendhcp.ini ] || install -m 0644 "$T/opendhcp.ini" /opt/opendhcp/opendhcp.ini
+[ -e /etc/opendhcp-panel/panel.toml ] || install -D -m 0600 "$T/panel.toml" /etc/opendhcp-panel/panel.toml
+# SELinux: contexto padrão dos caminhos (os arquivos vieram de uma pasta temporária)
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -R /opt/opendhcp /usr/local/bin/opendhcp-panel /etc/opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp-panel /etc/systemd/system/opendhcp.service /etc/systemd/system/opendhcp-panel.service || true
+fi
+systemctl daemon-reload
+systemctl enable --now opendhcp-panel.service
+"#;
+        let mut child = std::process::Command::new("pkexec")
+            .args(["sh", "-c", script])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("pkexec: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&tar.stdout).map_err(|e| e.to_string())?;
+        }
+        match child.wait() {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) if s.code() == Some(126) || s.code() == Some(127) => Err("pkexec: autorização negada".into()),
+            Ok(s) => Err(format!("pkexec: {s}")),
+            Err(e) => Err(e.to_string()),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&stage);
+    result
+}
+
+fn install_html() -> String {
+    notice_page(tr("install_title"), tr("install_text"), "/opt/opendhcp · opendhcp.service · opendhcp-panel.service", &[("install", tr("install"), true), ("skip", tr("skip"), false)])
+}
+
 fn resolve() -> Target {
     if let Some(url) = arg("--url").or_else(|| std::env::var("OPENDHCP_URL").ok()) {
         return Target::Url(url);
     }
     let system = Path::new(SYSTEM_CONFIG);
     if arg("--config").is_none() && cfg!(unix) && system.exists() {
-        if let Some(url) = url_from_config(system) {
-            return if reachable(&url) { Target::Url(url) } else { Target::Offline(url) };
-        }
+        let url = system_url();
+        return if reachable(&url) { Target::Url(url) } else { Target::Offline(url) };
     }
     let config = match arg("--config").map(PathBuf::from).map(Ok).unwrap_or_else(user_config) {
         Ok(c) => c,
         Err(e) => return Target::Failed { error: e.to_string(), config: PathBuf::new() },
     };
+    // Linux sem o servidor: o aplicativo traz o servidor e oferece instalar (uma vez)
+    if cfg!(target_os = "linux")
+        && arg("--config").is_none()
+        && !system.exists()
+        && server_payload().is_some()
+        && !skip_marker().is_some_and(|m| m.exists())
+    {
+        return Target::Install { config };
+    }
     match start_embedded(&config) {
         Ok(url) => Target::Url(url),
         Err(StartError::MissingIni(ini)) => Target::MissingIni { ini, config },
@@ -445,6 +589,7 @@ fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEve
         Target::Url(url) => builder.with_url(url),
         Target::Offline(url) => builder.with_html(offline_html(url)),
         Target::MissingIni { ini, .. } => builder.with_html(missing_html(ini)),
+        Target::Install { .. } => builder.with_html(install_html()),
         Target::Failed { error, config } => builder.with_html(failed_html(error, config)),
     };
     #[cfg(target_os = "linux")]
@@ -526,7 +671,7 @@ fn main() {
         _ => None,
     };
     let failed_config = match &target {
-        Target::Failed { config, .. } | Target::MissingIni { config, .. } => Some(config.clone()),
+        Target::Failed { config, .. } | Target::MissingIni { config, .. } | Target::Install { config } => Some(config.clone()),
         _ => None,
     };
     let mut missing_ini = match &target {
@@ -565,6 +710,40 @@ fn main() {
                         });
                     }
                 }
+                "install" => {
+                    if let Some(payload) = server_payload() {
+                        let proxy = proxy.clone();
+                        std::thread::spawn(move || {
+                            let result = install_server(&payload).and_then(|_| {
+                                let url = system_url();
+                                // espera o serviço do painel subir (até ~20 s)
+                                for _ in 0..40 {
+                                    if reachable(&url) {
+                                        return Ok(url);
+                                    }
+                                    std::thread::sleep(Duration::from_millis(500));
+                                }
+                                Err("opendhcp-panel.service".to_string())
+                            });
+                            let _ = proxy.send_event(UserEvent::Installed(result));
+                        });
+                    }
+                }
+                "skip" => {
+                    if let Some(m) = skip_marker() {
+                        let _ = std::fs::write(m, b"");
+                    }
+                    if let Some(config) = failed_config.clone() {
+                        let proxy = proxy.clone();
+                        std::thread::spawn(move || {
+                            let result = start_embedded(&config).map_err(|e| match e {
+                                StartError::MissingIni(p) => p.display().to_string(),
+                                StartError::Other(s) => s,
+                            });
+                            let _ = proxy.send_event(UserEvent::Embedded(result));
+                        });
+                    }
+                }
                 "open_config" => {
                     if let Some(c) = &failed_config {
                         open_path(c);
@@ -592,6 +771,17 @@ fn main() {
                 let msg = serde_quote(&format!("{} {e}", tr("create_failed")));
                 let _ = webview.evaluate_script(&format!(
                     "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => b.disabled = false);"
+                ));
+            }
+            Event::UserEvent(UserEvent::Installed(Ok(url))) => {
+                *guard.lock().unwrap() = Guard { notice: false, origin: origin_of(&url) };
+                let _ = webview.load_url(&url);
+            }
+            Event::UserEvent(UserEvent::Installed(Err(e))) => {
+                let msg = serde_quote(&format!("{} {e}", tr("install_failed")));
+                let label = serde_quote(tr("install"));
+                let _ = webview.evaluate_script(&format!(
+                    "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => {{ b.disabled = false; }}); document.querySelector('button.primary').textContent = {label};"
                 ));
             }
             Event::UserEvent(UserEvent::Downloaded(path)) => {
