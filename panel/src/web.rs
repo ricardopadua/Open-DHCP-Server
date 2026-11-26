@@ -186,6 +186,9 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> (Rout
         .route("/options", get(options_page).post(options_update))
         .route("/service/{action}", post(service_action))
         .route("/account", get(account_page).post(account_update))
+        .route("/maintenance", get(maintenance_page))
+        .route("/maintenance/reset", post(maintenance_reset))
+        .route("/maintenance/uninstall", post(maintenance_uninstall))
         .route("/notes/dismiss", post(dismiss_note))
         .route("/lang/{code}", get(set_lang))
         .route("/static/style.css", get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], CSS) }))
@@ -337,7 +340,7 @@ fn page(app: &App, ctx: &Ctx, title: &str, nav: &str, live: &str, body: Markup) 
     let snap = app.monitor.snapshot();
     let here = match nav {
         "dashboard" => "/".to_string(),
-        "activity" | "leases" | "reservations" | "ranges" | "options" | "account" | "backups" => format!("/{nav}"),
+        "activity" | "leases" | "reservations" | "ranges" | "options" | "account" | "backups" | "maintenance" => format!("/{nav}"),
         _ => "/".to_string(),
     };
     views::shell(
@@ -1618,6 +1621,246 @@ async fn account_update(
     let token = app.sessions.rotate(&ctx.token).unwrap_or_else(|| ctx.token.clone());
     app.sessions.set_flash(&token, true, t("Usuário e senha atualizados."));
     (jar.add(session_cookie(&app, token)), Redirect::to("/")).into_response()
+}
+
+// ---------- manutenção (restaurar padrões, desinstalar) ----------
+
+/// Como o painel foi instalado: decide se ele mesmo pode desinstalar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallKind {
+    /// Painel embutido (aplicativo) ou fora do systemd: não desinstala nada.
+    NotService,
+    /// Pacote .deb/.rpm: quem remove é o gerenciador de pacotes.
+    Deb,
+    Rpm,
+    /// Instalado pelo aplicativo (AppImage) ou pelo install.sh do .tar.gz.
+    Bundled,
+}
+
+fn running_as_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(2).map(|u| u == "0")))
+        .unwrap_or(false)
+}
+
+fn install_kind() -> InstallKind {
+    // serviço do systemd (INVOCATION_ID) rodando como root
+    if !cfg!(target_os = "linux") || std::env::var_os("INVOCATION_ID").is_none() || !running_as_root() {
+        return InstallKind::NotService;
+    }
+    if std::path::Path::new("/var/lib/dpkg/info/open-dhcp.list").exists() {
+        return InstallKind::Deb;
+    }
+    if std::process::Command::new("rpm").args(["-q", "--quiet", "open-dhcp"]).status().is_ok_and(|s| s.success()) {
+        return InstallKind::Rpm;
+    }
+    InstallKind::Bundled
+}
+
+/// Script da desinstalação. Roda numa unit transitória (systemd-run), fora do painel: parar o
+/// serviço do painel não interrompe a remoção, e a unit não tem o isolamento do painel (que não
+/// pode gravar em /usr). Só caminhos fixos da instalação, nunca caminhos do panel.toml.
+fn uninstall_script(purge: bool) -> String {
+    let mut s = String::from(
+        "sleep 2\n\
+         systemctl disable --now opendhcp.service opendhcp-panel.service || true\n\
+         rm -f /etc/systemd/system/opendhcp.service /etc/systemd/system/opendhcp-panel.service \
+         /usr/lib/systemd/system/opendhcp.service /usr/lib/systemd/system/opendhcp-panel.service \
+         /usr/local/bin/opendhcp-panel /usr/bin/opendhcp-panel /usr/bin/open-dhcp /opt/opendhcp/opendhcpd \
+         /usr/share/applications/open-dhcp.desktop /usr/share/icons/hicolor/256x256/apps/open-dhcp.png\n\
+         rm -rf /usr/share/doc/open-dhcp\n",
+    );
+    if purge {
+        s.push_str("rm -rf /opt/opendhcp /etc/opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp-panel\n");
+    }
+    s.push_str("systemctl daemon-reload\nsystemctl reset-failed opendhcp.service opendhcp-panel.service 2>/dev/null || true\n");
+    s
+}
+
+fn maintenance_body(csrf: &str, kind: InstallKind, err: Option<&str>) -> Markup {
+    html! {
+        (error_box(err))
+        form.card.form method="post" action="/maintenance/reset" autocomplete="off"
+            data-confirm=(t("Restaurar os padrões? A configuração atual e os leases serão substituídos.")) {
+            (csrf_input(csrf))
+            h2 { (t("Restaurar padrões")) }
+            p { (t("Volta o servidor DHCP ao estado de recém-instalado:")) }
+            ul {
+                li { (tm("o {} volta ao arquivo padrão (uma cópia do atual fica em Backups);", &[html! { span.mono { "opendhcp.ini" } }])) }
+                li { (t("os leases gravados são apagados e o servidor DHCP é parado;")) }
+                li { (t("o login do painel volta para admin / admin, com troca obrigatória no próximo acesso, e todas as sessões são encerradas.")) }
+            }
+            p.muted.small { (t("Apelidos dos dispositivos, histórico de atividade e backups são mantidos.")) }
+            div.fields {
+                label { (t("Senha atual")) input type="password" name="current" required autocomplete="current-password"; }
+            }
+            div.form-actions {
+                button.btn.soft-danger type="submit" { (icon("refresh")) (t("Restaurar padrões")) }
+            }
+        }
+        @match kind {
+            InstallKind::Bundled => {
+                form.card.form method="post" action="/maintenance/uninstall" autocomplete="off"
+                    data-confirm=(t("Desinstalar o Open DHCP deste computador?")) {
+                    (csrf_input(csrf))
+                    h2 { (t("Desinstalar")) }
+                    p { (t("Remove deste computador o servidor DHCP, o painel, o aplicativo e os serviços do systemd. O painel sai do ar logo em seguida.")) }
+                    div.fields {
+                        div {
+                            label.check { input type="checkbox" name="purge" value="1";
+                                span { (t("Apagar também a configuração, os leases e os backups")) } }
+                            small.muted { (t("Sem marcar, a configuração e os leases ficam no disco e são usados numa reinstalação.")) }
+                        }
+                        label { (t("Senha atual")) input type="password" name="current" required autocomplete="current-password"; }
+                    }
+                    div.form-actions {
+                        button.btn.soft-danger type="submit" { (icon("trash")) (t("Desinstalar")) }
+                    }
+                }
+            }
+            InstallKind::Deb | InstallKind::Rpm => {
+                div.card.form {
+                    h2 { (t("Desinstalar")) }
+                    p { (t("O Open DHCP foi instalado por um pacote do sistema. Para remover, rode num terminal:")) }
+                    pre.mono { (if kind == InstallKind::Deb { "sudo apt remove open-dhcp" } else { "sudo dnf remove open-dhcp" }) }
+                }
+            }
+            InstallKind::NotService => {
+                div.card.form {
+                    h2 { (t("Desinstalar")) }
+                    p.muted { (t("A desinstalação fica no painel do serviço instalado (systemd).")) }
+                }
+            }
+        }
+    }
+}
+
+async fn maintenance_page(State(app): State<Shared>, ctx: Ctx) -> Response {
+    let kind = tokio::task::spawn_blocking(install_kind).await.unwrap_or(InstallKind::NotService);
+    let body = maintenance_body(&ctx.s.csrf, kind, None);
+    page(&app, &ctx, n_("Manutenção"), "maintenance", "other", body).into_response()
+}
+
+/// Confere a senha atual (com o bloqueio por tentativas). Em caso de erro, devolve a mensagem.
+async fn confirm_password(app: &App, ip: std::net::IpAddr, f: &Fields) -> Result<(), &'static str> {
+    if app.sessions.locked_out(ip) {
+        return Err(t("Muitas tentativas. Aguarde 5 minutos."));
+    }
+    let hash = app.creds.read().unwrap().1.clone();
+    let current = field(f, "current").to_string();
+    if tokio::task::spawn_blocking(move || auth::verify_password(&current, &hash)).await.unwrap_or(false) {
+        app.sessions.clear_fails(ip);
+        Ok(())
+    } else {
+        app.sessions.record_fail(ip);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        Err(t("A senha atual está errada."))
+    }
+}
+
+async fn maintenance_reset(
+    State(app): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+    ctx: Ctx,
+    Form(f): Form<Fields>,
+) -> Response {
+    let ip = app.client_ip(peer, &headers);
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let kind = tokio::task::spawn_blocking(install_kind).await.unwrap_or(InstallKind::NotService);
+    let fail = |msg: &str| {
+        let body = maintenance_body(&ctx.s.csrf, kind, Some(msg));
+        (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Manutenção"), "maintenance", "other", body)).into_response()
+    };
+    if let Err(msg) = confirm_password(&app, ip, &f).await {
+        return fail(msg);
+    }
+    tracing::warn!(%ip, user = %ctx.s.user, "restaurando os padrões");
+    if let Err(e) = service::act(&app.cfg.service, Action::Stop).await {
+        tracing::warn!(error = %e, "não consegui parar o serviço antes de restaurar");
+    }
+    let hash = match tokio::task::spawn_blocking(|| auth::hash_password(DEFAULT_PASSWORD)).await {
+        Ok(Ok(h)) => h,
+        _ => return fail(t("Não consegui gerar o hash da senha.")),
+    };
+    let done = {
+        let _guard = app.write_lock.lock().await;
+        let ini = &app.cfg.ini_file;
+        (|| -> anyhow::Result<()> {
+            if ini.exists() {
+                crate::fsutil::backup(ini, &app.cfg.backup_dir, app.cfg.backups_keep)?;
+            }
+            crate::fsutil::write_atomic(ini, crate::DEFAULT_INI.as_bytes())?;
+            match std::fs::remove_file(&app.cfg.state_file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            let text = std::fs::read_to_string(&app.config_path)?;
+            let text = crate::config::set_auth(&text, "admin", &hash)?;
+            crate::fsutil::write_atomic(&app.config_path, text.as_bytes())?;
+            Ok(())
+        })()
+    };
+    if let Err(e) = done {
+        tracing::error!(error = %e, "falha ao restaurar os padrões");
+        return fail(&tf!("Não consegui restaurar os padrões: {}", e));
+    }
+    *app.creds.write().unwrap() = ("admin".to_string(), hash);
+    app.default_password.store(true, Ordering::SeqCst);
+    app.monitor.put_extra(password_alert());
+    app.monitor.set_extra("restart", None).await;
+    app.restart_rev.fetch_add(1, Ordering::SeqCst);
+    app.sessions.keep_only("", "");
+    app.monitor.poke().await;
+    tracing::warn!(%ip, "padrões restaurados; login admin/admin");
+    (jar.remove(Cookie::build(COOKIE).path("/")), Redirect::to("/login")).into_response()
+}
+
+async fn maintenance_uninstall(
+    State(app): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    ctx: Ctx,
+    Form(f): Form<Fields>,
+) -> Response {
+    let ip = app.client_ip(peer, &headers);
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let kind = tokio::task::spawn_blocking(install_kind).await.unwrap_or(InstallKind::NotService);
+    let fail = |msg: &str| {
+        let body = maintenance_body(&ctx.s.csrf, kind, Some(msg));
+        (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Manutenção"), "maintenance", "other", body)).into_response()
+    };
+    if kind != InstallKind::Bundled {
+        return fail(t("A desinstalação fica no painel do serviço instalado (systemd)."));
+    }
+    if let Err(msg) = confirm_password(&app, ip, &f).await {
+        return fail(msg);
+    }
+    let purge = field(&f, "purge") == "1";
+    let unit = format!("opendhcp-uninstall-{}", chrono::Utc::now().timestamp());
+    let out = tokio::process::Command::new("systemd-run")
+        .args(["--unit", &unit, "--collect", "--no-block", "--quiet", "/bin/sh", "-c", &uninstall_script(purge)])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => return fail(&tf!("Não consegui iniciar a desinstalação: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => return fail(&tf!("Não consegui iniciar a desinstalação: {}", e)),
+    }
+    tracing::warn!(%ip, user = %ctx.s.user, purge, %unit, "desinstalação iniciada");
+    let body = html! {
+        div.card.form {
+            h2 { (t("Desinstalação em andamento")) }
+            p { (t("O Open DHCP está sendo removido deste computador. O painel sai do ar em alguns segundos; pode fechar esta janela.")) }
+        }
+    };
+    page(&app, &ctx, n_("Manutenção"), "maintenance", "other", body).into_response()
 }
 
 // ---------- notificações ----------
