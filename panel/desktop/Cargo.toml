@@ -1,6 +1,6 @@
 [package]
 name = "open-dhcp"
-version = "1.2.8"
+version = "1.2.9"
 edition = "2021"
 description = "Open DHCP - painel do servidor DHCP numa janela própria"
 license = "GPL-2.0-only"
