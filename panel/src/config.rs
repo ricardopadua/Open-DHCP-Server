@@ -24,6 +24,13 @@ pub struct Config {
     pub backup_dir: PathBuf,
     #[serde(default = "default_backups_keep")]
     pub backups_keep: usize,
+    /// Dados do próprio painel (apelidos e anotações dos dispositivos).
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    /// Lista de fabricantes por MAC (oui.txt do IEEE ou manuf do Wireshark). Sem esta linha, o
+    /// painel procura nos caminhos comuns (pacotes hwdata/ieee-data).
+    #[serde(default)]
+    pub oui_file: Option<PathBuf>,
     /// Marque `true` quando o painel estiver atrás de HTTPS (cookie só via TLS).
     #[serde(default)]
     pub secure_cookie: bool,
@@ -67,6 +74,9 @@ fn default_state() -> PathBuf {
 }
 fn default_backup_dir() -> PathBuf {
     "/var/lib/opendhcp-panel/backups".into()
+}
+fn default_data_dir() -> PathBuf {
+    "/var/lib/opendhcp-panel".into()
 }
 fn default_backups_keep() -> usize {
     30

@@ -19,6 +19,14 @@ log_file = "/opt/opendhcp/log/opendhcp%Y%m%d.log"
 backup_dir = "/var/lib/opendhcp-panel/backups"
 backups_keep = 30
 
+# Dados do próprio painel: apelidos e anotações dos dispositivos (devices.json).
+data_dir = "/var/lib/opendhcp-panel"
+
+# Lista de fabricantes por MAC. Sem esta linha, o painel procura nos caminhos comuns
+# (/usr/share/hwdata/oui.txt, /usr/share/ieee-data/oui.txt, /usr/share/misc/oui.txt,
+# /usr/share/wireshark/manuf). Pacote: hwdata (Fedora/RHEL) ou ieee-data (Debian/Ubuntu).
+# oui_file = "/usr/share/hwdata/oui.txt"
+
 [auth]
 username = "admin"
 # Gere com: opendhcp-panel hash-password

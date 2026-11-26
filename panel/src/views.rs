@@ -6,6 +6,7 @@ use std::net::Ipv4Addr;
 use chrono::{Duration as CDuration, NaiveDateTime};
 use maud::{html, Markup, DOCTYPE};
 
+use crate::devices::{DeviceStore, Oui, Vendor};
 use crate::dhcp;
 use crate::events::{self, Event, Kind};
 use crate::ini::IniDoc;
@@ -44,6 +45,8 @@ pub fn icon(name: &str) -> Markup {
         "bell" => "M10 5a2 2 0 1 1 4 0 7 7 0 0 1 4 6v3a4 4 0 0 0 2 3H4a4 4 0 0 0 2-3v-3a7 7 0 0 1 4-6M9 17v1a3 3 0 0 0 6 0v-1",
         "x" => "M18 6 6 18M6 6l12 12",
         "globe" => "M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 0 0 0 18M12.5 3a17 17 0 0 1 0 18",
+        "download" => "M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 11l5 5 5-5M12 4v12",
+        "upload" => "M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 9l5-5 5 5M12 4v12",
         "trash" => "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3",
         _ => "M12 12m-8 0a8 8 0 1 0 16 0 8 8 0 1 0-16 0",
     };
@@ -86,6 +89,10 @@ pub fn fmt_expiry(exp: i64, now: i64) -> (String, String) {
         tf!("em {} dias", left / 86400)
     };
     (when, rel)
+}
+
+pub fn ago_pub(ts: Option<NaiveDateTime>, now: NaiveDateTime) -> String {
+    ago(ts, now)
 }
 
 fn ago(ts: Option<NaiveDateTime>, now: NaiveDateTime) -> String {
@@ -144,6 +151,47 @@ pub fn usage_bar(used: u64, total: u64) -> Markup {
 
 pub fn error_box(err: Option<&str>) -> Markup {
     html! { @if let Some(e) = err { div.alert.bad role="alert" { (icon("alert")) span { (e) } } } }
+}
+
+// ---------- dispositivos (apelido, fabricante) ----------
+
+/// O que o painel sabe dos dispositivos além do DHCP: apelidos e fabricantes.
+#[derive(Clone, Copy)]
+pub struct Dev<'a> {
+    pub store: &'a DeviceStore,
+    pub oui: &'a Oui,
+}
+
+impl Dev<'_> {
+    pub fn alias(&self, mac: &str) -> Option<String> {
+        self.store.alias(mac)
+    }
+
+    pub fn vendor(&self, mac: &str) -> Option<String> {
+        self.oui.vendor(mac).map(|v| match v {
+            Vendor::Known(name) => name,
+            Vendor::Random => t("MAC aleatório (privado)").to_string(),
+        })
+    }
+}
+
+/// MAC com link para a página do dispositivo e o fabricante embaixo.
+pub fn mac_cell(dev: Dev, mac: &str) -> Markup {
+    html! {
+        a.mono.dev-link href={"/devices/" (mac)} { (mac) }
+        @if let Some(v) = dev.vendor(mac) { br; span.muted.small.vendor { (v) } }
+    }
+}
+
+/// Apelido (se houver) e nome do host.
+pub fn name_cell(dev: Dev, mac: &str, hostname: &str) -> Markup {
+    let alias = dev.alias(mac);
+    html! {
+        @if let Some(a) = &alias { strong { (a) } }
+        @if !hostname.is_empty() {
+            @if alias.is_some() { br; span.muted.small { (hostname) } } @else { (hostname) }
+        } @else if alias.is_none() { span.muted { "—" } }
+    }
 }
 
 // ---------- dados derivados ----------
@@ -794,7 +842,7 @@ pub fn frag_feed(snap: &Snapshot) -> Markup {
                                 }
                                 td { (kind_tag(e.kind)) }
                                 td { (events::describe(e)) }
-                                td.mono { (e.mac.as_deref().unwrap_or("")) }
+                                td.mono { @if let Some(m) = &e.mac { a.dev-link href={"/devices/" (m)} { (m) } } }
                                 td.mono { @if !matches!(e.kind, Kind::NoRange) { (e.ip.as_deref().unwrap_or("")) } }
                             }
                         }
@@ -807,14 +855,14 @@ pub fn frag_feed(snap: &Snapshot) -> Markup {
 
 // ---------- leases ----------
 
-pub fn leases_body(snap: &Snapshot, csrf: &str, state_file: &str) -> Markup {
+pub fn leases_body(snap: &Snapshot, csrf: &str, state_file: &str, dev: Dev) -> Markup {
     html! {
         section.card {
             div.card-head {
                 h2.card-title #lease-count { (frag_lease_count(snap)) }
                 label.search { (icon("search")) input type="search" placeholder=(t("Filtrar por MAC, IP ou nome")) data-filter="#lease-table" aria-label=(t("Filtrar")); }
             }
-            div #lease-wrap { (frag_lease_table(snap, csrf)) }
+            div #lease-wrap { (frag_lease_table(snap, csrf, dev)) }
         }
         p.hint {
             (tm("Lidos de {} e atualizados sozinhos. Para liberar um lease, o painel para o serviço por alguns segundos, tira o dispositivo do arquivo e inicia o serviço de novo; o dispositivo pede um IP novo na próxima renovação.", &[html! { code { (state_file) } }]))
@@ -827,7 +875,7 @@ pub fn frag_lease_count(snap: &Snapshot) -> Markup {
     html! { (tf!("{} dispositivo(s) com IP", n)) }
 }
 
-pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
+pub fn frag_lease_table(snap: &Snapshot, csrf: &str, dev: Dev) -> Markup {
     let now = now_ts();
     let reserved: Vec<String> = dhcp::reservations(&snap.doc).into_iter().map(|r| r.mac).collect();
     let mut active: Vec<&Lease> = snap.leases.iter().filter(|l| l.is_active(now)).collect();
@@ -839,7 +887,7 @@ pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
         } @else {
             div.table-wrap {
                 table #lease-table {
-                    thead { tr { th { "IP" } th { "MAC" } th { (t("Nome do host")) } th { (t("Expira")) } th { (t("Tipo")) } th.actions { "" } } }
+                    thead { tr { th { "IP" } th { "MAC" } th { (t("Nome")) } th { (t("Expira")) } th { (t("Tipo")) } th.actions { "" } } }
                     tbody {
                         @for l in &active {
                             @let (when, rel) = fmt_expiry(l.expiry, now);
@@ -853,8 +901,8 @@ pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
                                         None => {}
                                     }
                                 }
-                                td.mono { (l.mac) }
-                                td { @if l.hostname.is_empty() { span.muted { "—" } } @else { (l.hostname) } }
+                                td { (mac_cell(dev, &l.mac)) }
+                                td { (name_cell(dev, &l.mac, &l.hostname)) }
                                 td.nowrap { (when) " " span.muted.small { (rel) } }
                                 td { @if is_res { span.tag.info { (t("Reserva")) } } @else { span.tag { (t("Dinâmico")) } } }
                                 td.actions {
@@ -963,7 +1011,13 @@ mod tests {
     fn hostname_malicioso_e_escapado() {
         let mut s = snap_with(&["[26-Nov-26 03:30:48] Host aa:bb:cc:dd:ee:01 (<img src=x onerror=alert(1)>) allotted 10.0.0.2 for 60 seconds"]);
         s.leases.push(Lease { index: 1, mac: "aa:bb:cc:dd:ee:01".into(), ip: Ipv4Addr::new(10, 0, 0, 2), expiry: leases::INFINITE, hostname: "<b>x</b>".into(), local: true });
-        let html = frag_feed(&s).into_string() + &frag_lease_table(&s, "t").into_string() + &frag_timeline(&s, 5).into_string();
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("d.json"));
+        store.set("aa:bb:cc:dd:ee:01", crate::devices::DeviceInfo { alias: "<i>apelido</i>".into(), notes: String::new() }).unwrap();
+        let oui = Oui::default();
+        let dev = Dev { store: &store, oui: &oui };
+        let html = frag_feed(&s).into_string() + &frag_lease_table(&s, "t", dev).into_string() + &frag_timeline(&s, 5).into_string();
+        assert!(!html.contains("<i>apelido"));
         assert!(!html.contains("<img"));
         assert!(!html.contains("<b>x"));
         assert!(html.contains("&lt;img"));

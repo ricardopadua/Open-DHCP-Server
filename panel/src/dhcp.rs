@@ -270,6 +270,112 @@ pub fn delete_reservation(doc: &mut IniDoc, n: usize) -> Result<String, String> 
     Ok(r.mac)
 }
 
+// ---------- sugestão de IP, importação e exportação (CSV) ----------
+
+/// Primeiro IP livre para uma nova reserva, na rede da primeira faixa (máscara do conjunto ou
+/// global; sem máscara, /24). Evita endereço de rede, broadcast, gateways, IPs reservados e os
+/// que estão com lease agora (`in_use`). Prefere IPs fora das faixas dinâmicas; se não houver,
+/// usa um livre dentro delas.
+pub fn suggest_ip(doc: &IniDoc, in_use: &[Ipv4Addr]) -> Option<Ipv4Addr> {
+    let sets = range_sets(doc);
+    let set = sets.iter().find(|s| s.ranges.iter().any(|r| parse_range(r).is_some()))?;
+    let (first, _) = set.ranges.iter().find_map(|r| parse_range(r))?;
+    let g = globals(doc).opts;
+    let pick = |own: &Option<String>, global: &Option<String>| own.clone().or_else(|| global.clone());
+    let mask = pick(&set.opts.mask, &g.mask).and_then(|m| m.parse::<Ipv4Addr>().ok()).filter(|m| prefix_of(*m).is_some()).unwrap_or(mask_of(24));
+    let gateways: Vec<Ipv4Addr> =
+        pick(&set.opts.router, &g.router).map(|r| r.split([',', ' ', ';']).filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+    let reserved: Vec<Ipv4Addr> = reservations(doc).iter().filter_map(|r| r.ip.as_ref()?.parse().ok()).collect();
+    let dynamic = all_ranges(doc);
+    let (net, bcast) = net_bounds(first, mask);
+    let (lo, hi) = (u32::from(net).saturating_add(1), u32::from(bcast).saturating_sub(1));
+    let free = |ip: Ipv4Addr| !gateways.contains(&ip) && !reserved.contains(&ip) && !in_use.contains(&ip);
+    let in_dynamic = |ip: Ipv4Addr| dynamic.iter().any(|(_, a, b)| (u32::from(*a)..=u32::from(*b)).contains(&u32::from(ip)));
+    let candidates = (lo..=hi).take(65536).map(Ipv4Addr::from);
+    candidates.clone().find(|ip| free(*ip) && !in_dynamic(*ip)).or_else(|| candidates.clone().find(|ip| free(*ip)))
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', ';', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Reservas em CSV: `mac,ip,hostname` (IP vazio = dispositivo bloqueado).
+pub fn export_csv(doc: &IniDoc) -> String {
+    let mut out = String::from("mac,ip,hostname\n");
+    for r in reservations(doc) {
+        out.push_str(&format!(
+            "{},{},{}\n",
+            r.mac,
+            csv_field(r.ip.as_deref().unwrap_or("")),
+            csv_field(r.hostname.as_deref().unwrap_or(""))
+        ));
+    }
+    out
+}
+
+/// Separa uma linha de CSV (vírgula ou ponto e vírgula, aspas duplas opcionais).
+fn csv_split(line: &str) -> Vec<String> {
+    let sep = if line.contains(';') && !line.contains(',') { ';' } else { ',' };
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            c if c == sep && !quoted => out.push(std::mem::take(&mut cur).trim().to_string()),
+            c => cur.push(c),
+        }
+    }
+    out.push(cur.trim().to_string());
+    out
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct ImportResult {
+    pub created: usize,
+    pub updated: usize,
+}
+
+/// Importa reservas de um CSV (`mac,ip,hostname`; cabeçalho opcional). Tudo ou nada: com um
+/// erro em qualquer linha, nada é alterado. Com `update`, um MAC que já tem reserva é atualizado
+/// em vez de recusado.
+pub fn import_csv(doc: &mut IniDoc, text: &str, update: bool) -> Result<ImportResult, String> {
+    let mut work = doc.clone();
+    let mut res = ImportResult::default();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cols = csv_split(line);
+        if cols.first().is_some_and(|c| c.eq_ignore_ascii_case("mac")) {
+            continue;
+        }
+        let get = |k: usize| cols.get(k).map(String::as_str).unwrap_or("");
+        let input = ReservationInput { mac: get(0), ip: get(1), hostname: get(2) };
+        let existing = normalize_mac(get(0)).and_then(|m| reservations(&work).into_iter().find(|r| r.mac == m));
+        let result = match existing {
+            Some(r) if update => update_reservation(&mut work, r.n, &input).map(|_| res.updated += 1),
+            _ => add_reservation(&mut work, &input).map(|_| res.created += 1),
+        };
+        result.map_err(|e| tf!("Linha {}: {}", i + 1, e))?;
+    }
+    if res.created + res.updated == 0 {
+        return Err(tf!("Nenhuma reserva no texto. Use uma linha por dispositivo: mac,ip,nome"));
+    }
+    *doc = work;
+    Ok(res)
+}
+
 // ---------- rede (máscara, prefixo, sub-rede) ----------
 
 /// Máscara do prefixo `/p` (0 a 32).
@@ -452,6 +558,35 @@ mod tests {
 
     fn sample() -> IniDoc {
         IniDoc::parse(include_str!("../../opendhcp.ini"))
+    }
+
+    #[test]
+    fn sugere_ip_livre_fora_das_faixas() {
+        let mut doc = IniDoc::parse("[RANGE_SET]\nDHCPRange=192.168.0.100-192.168.0.200\nSubnetMask=255.255.255.0\nRouter=192.168.0.1\n\n[00:00:00:00:00:01]\nIP=192.168.0.2\n");
+        let used: Vec<Ipv4Addr> = vec!["192.168.0.3".parse().unwrap()];
+        assert_eq!(suggest_ip(&doc, &used), Some("192.168.0.4".parse().unwrap()));
+        // rede cheia fora das faixas: usa uma livre dentro
+        doc = IniDoc::parse("[RANGE_SET]\nDHCPRange=10.0.0.1-10.0.0.6\nSubnetMask=255.255.255.248\n");
+        assert_eq!(suggest_ip(&doc, &["10.0.0.1".parse().unwrap()]), Some("10.0.0.2".parse().unwrap()));
+        assert_eq!(suggest_ip(&IniDoc::parse(""), &[]), None);
+    }
+
+    #[test]
+    fn importa_e_exporta_csv() {
+        let mut doc = IniDoc::parse("[RANGE_SET]\nDHCPRange=10.0.0.100-10.0.0.200\n");
+        let csv = "mac;ip;hostname\nAA-BB-CC-DD-EE-01;10.0.0.10;impressora\n\"aa:bb:cc:dd:ee:02\";;\n";
+        assert_eq!(import_csv(&mut doc, csv, false).unwrap(), ImportResult { created: 2, updated: 0 });
+        let out = export_csv(&doc);
+        assert!(out.starts_with("mac,ip,hostname\naa:bb:cc:dd:ee:01,10.0.0.10,impressora\naa:bb:cc:dd:ee:02,,\n"), "{out}");
+        // já existe: sem `update` recusa e não muda nada
+        let before = doc.to_text();
+        let err = import_csv(&mut doc, "aa:bb:cc:dd:ee:03,10.0.0.11,\naa:bb:cc:dd:ee:01,10.0.0.12,", false).unwrap_err();
+        assert!(err.starts_with("Linha 2:"), "{err}");
+        assert_eq!(doc.to_text(), before, "tudo ou nada");
+        let r = import_csv(&mut doc, "aa:bb:cc:dd:ee:01,10.0.0.12,nova", true).unwrap();
+        assert_eq!(r, ImportResult { created: 0, updated: 1 });
+        assert!(export_csv(&doc).contains("aa:bb:cc:dd:ee:01,10.0.0.12,nova"));
+        assert!(import_csv(&mut doc, "\n# só comentário\n", false).is_err());
     }
 
     #[test]

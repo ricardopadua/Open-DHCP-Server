@@ -256,6 +256,57 @@
 
   updateNet();
 
+  // ---------- reserva: IP livre sugerido e aviso de IP ocupado ----------
+  const resIp = $("[data-res-ip]");
+  const parseJson = (s) => {
+    try {
+      return JSON.parse(s || "{}");
+    } catch (_) {
+      return {};
+    }
+  };
+  const normMac = (s) => (s || "").trim().toLowerCase().replace(/-/g, ":");
+
+  function checkResIp() {
+    const warn = $("#ip-warn");
+    if (!resIp || !warn) return;
+    const ip = resIp.value.trim();
+    const mac = normMac(($("[data-res-mac]") || {}).value);
+    const used = parseJson(resIp.getAttribute("data-used"))[ip];
+    const reserved = parseJson(resIp.getAttribute("data-reserved"))[ip];
+    if (used && used[0] !== mac) warn.textContent = fill(resIp.getAttribute("data-t-used"), used[1], used[0]);
+    else if (reserved && reserved !== mac) warn.textContent = fill(resIp.getAttribute("data-t-reserved"), reserved);
+    else warn.textContent = "";
+  }
+
+  if (resIp) {
+    document.addEventListener("input", (ev) => {
+      if (ev.target.matches && ev.target.matches("[data-res-ip], [data-res-mac]")) checkResIp();
+    });
+    checkResIp();
+  }
+
+  document.addEventListener("click", (ev) => {
+    const sug = ev.target.closest("[data-suggest-ip]");
+    if (sug && resIp) {
+      resIp.value = sug.getAttribute("data-suggest-ip");
+      resIp.focus();
+      checkResIp();
+    }
+  });
+
+  // ---------- importar CSV: o arquivo escolhido vai para a caixa de texto ----------
+  document.addEventListener("change", (ev) => {
+    const input = ev.target;
+    if (!input.matches || !input.matches("[data-csv-file]") || !input.files || !input.files[0]) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const ta = $("[data-csv-text]");
+      if (ta) ta.value = String(reader.result || "");
+    };
+    reader.readAsText(input.files[0]);
+  });
+
   // tempo real (Server-Sent Events)
   const page = document.body.getAttribute("data-live");
   if (page && window.EventSource) {
