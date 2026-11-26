@@ -391,7 +391,9 @@ pub fn shell(s: Shell, snap: &Snapshot, body: Markup) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " · Open DHCP" }
                 script src="/static/theme.js" {}
+                link rel="stylesheet" href="/static/flatpickr.css";
                 link rel="stylesheet" href="/static/style.css";
+                script src="/static/flatpickr.js" defer {}
                 script src="/static/app.js" defer {}
             }
             body data-live=(s.live) {
@@ -888,7 +890,8 @@ pub fn day_nav(day: chrono::NaiveDate, today: chrono::NaiveDate, first: Option<c
             @if day > first {
                 a.icon-btn href=(href(day.pred_opt().unwrap_or(day))) title=(t("Dia anterior")) aria-label=(t("Dia anterior")) { "‹" }
             }
-            input type="date" name="day" value=(day) min=(first) max=(today) data-autosubmit aria-label=(t("Dia"));
+            input.date-input type="text" name="day" value=(day) min=(first) max=(today) data-date data-autosubmit
+                data-t-today=(t("Hoje")) aria-label=(t("Dia")) autocomplete="off";
             @if day < today {
                 a.icon-btn href=(href(day.succ_opt().unwrap_or(day))) title=(t("Próximo dia")) aria-label=(t("Próximo dia")) { "›" }
                 a.btn.light.small href="/activity" { (t("Hoje")) }

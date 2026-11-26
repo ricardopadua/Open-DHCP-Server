@@ -37,6 +37,8 @@ const LANG_COOKIE: &str = "odp_lang";
 const CSS: &str = include_str!("../assets/style.css");
 const JS: &str = include_str!("../assets/app.js");
 const THEME_JS: &str = include_str!("../assets/theme.js");
+const FLATPICKR_JS: &str = include_str!("../assets/flatpickr.min.js");
+const FLATPICKR_CSS: &str = include_str!("../assets/flatpickr.css");
 
 pub struct App {
     pub cfg: Config,
@@ -129,6 +131,8 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         .route("/lang/{code}", get(set_lang))
         .route("/static/style.css", get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], CSS) }))
         .route("/static/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], JS) }))
+        .route("/static/flatpickr.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], FLATPICKR_JS) }))
+        .route("/static/flatpickr.css", get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], FLATPICKR_CSS) }))
         .route("/static/theme.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], THEME_JS) }))
         .layer(middleware::from_fn(with_lang))
         .layer(middleware::from_fn(security_headers))
