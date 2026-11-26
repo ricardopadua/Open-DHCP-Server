@@ -332,7 +332,6 @@ pub static TABLE: &[[&str; 4]] = &[
     ["Impressora do RH", "HR printer", "Imprimante des RH", "Impresora de RR. HH."],
     ["Onde fica, quem usa, número de patrimônio...", "Where it is, who uses it, asset tag...", "Emplacement, utilisateur, numéro d'inventaire...", "Dónde está, quién lo usa, número de inventario..."],
     ["Guardado no painel ({}), não no opendhcp.ini.", "Stored by the panel ({}), not in opendhcp.ini.", "Enregistré par le panneau ({}), pas dans opendhcp.ini.", "Guardado en el panel ({}), no en opendhcp.ini."],
-    ["Nenhum evento deste dispositivo no histórico em memória.", "No events for this device in the in-memory history.", "Aucun événement pour cet appareil dans l'historique en mémoire.", "No hay eventos de este dispositivo en el historial en memoria."],
     ["O histórico vem dos eventos do log que o painel guarda em memória (os mais recentes).", "The history comes from the log events the panel keeps in memory (the most recent ones).", "L'historique provient des événements du journal que le panneau garde en mémoire (les plus récents).", "El historial viene de los eventos del log que el panel guarda en memoria (los más recientes)."],
     ["Dados do dispositivo salvos.", "Device details saved.", "Informations de l'appareil enregistrées.", "Datos del dispositivo guardados."],
     ["Texto longo demais (máximo de {} caracteres).", "Text too long (maximum {} characters).", "Texte trop long ({} caractères maximum).", "Texto demasiado largo (máximo {} caracteres)."],
@@ -354,4 +353,16 @@ pub static TABLE: &[[&str; 4]] = &[
     ["Importação concluída: {} reserva(s) criada(s), {} atualizada(s).", "Import finished: {} reservation(s) created, {} updated.", "Importation terminée : {} réservation(s) créée(s), {} mise(s) à jour.", "Importación terminada: {} reserva(s) creada(s), {} actualizada(s)."],
     ["Linha {}: {}", "Line {}: {}", "Ligne {} : {}", "Línea {}: {}"],
     ["Nenhuma reserva no texto. Use uma linha por dispositivo: mac,ip,nome", "No reservations in the text. Use one line per device: mac,ip,name", "Aucune réservation dans le texte. Utilisez une ligne par appareil : mac,ip,nom", "No hay reservas en el texto. Use una línea por dispositivo: mac,ip,nombre"],
+
+    // ---------- histórico em disco ----------
+    ["Dia", "Day", "Jour", "Día"],
+    ["Dia anterior", "Previous day", "Jour précédent", "Día anterior"],
+    ["Próximo dia", "Next day", "Jour suivant", "Día siguiente"],
+    ["Hoje", "Today", "Aujourd'hui", "Hoy"],
+    ["Eventos de {}", "Events on {}", "Événements du {}", "Eventos del {}"],
+    ["{} evento(s): {} IP(s) entregue(s), {} renovação(ões), {} liberado(s), {} problema(s).", "{} event(s): {} IP(s) allotted, {} renewal(s), {} released, {} problem(s).", "{} événement(s) : {} IP attribuée(s), {} renouvellement(s), {} libérée(s), {} problème(s).", "{} evento(s): {} IP entregada(s), {} renovación(es), {} liberada(s), {} problema(s)."],
+    ["Nenhum evento guardado neste dia.", "No events stored for this day.", "Aucun événement enregistré ce jour-là.", "No hay eventos guardados en este día."],
+    ["Nenhum evento deste dispositivo no histórico.", "No events for this device in the history.", "Aucun événement pour cet appareil dans l'historique.", "No hay eventos de este dispositivo en el historial."],
+    ["Histórico guardado em disco pelo painel (últimos {} dias).", "History stored on disk by the panel (last {} days).", "Historique enregistré sur disque par le panneau ({} derniers jours).", "Historial guardado en disco por el panel (últimos {} días)."],
+    ["Histórico guardado em disco pelo painel (sem limite de dias).", "History stored on disk by the panel (no day limit).", "Historique enregistré sur disque par le panneau (sans limite de jours).", "Historial guardado en disco por el panel (sin límite de días)."],
 ];

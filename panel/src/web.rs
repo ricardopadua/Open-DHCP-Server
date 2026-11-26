@@ -418,10 +418,32 @@ async fn dashboard(State(app): State<Shared>, ctx: Ctx) -> Response {
     page(&app, &ctx, n_("Visão geral"), "dashboard", "dashboard", body).into_response()
 }
 
-async fn activity_page(State(app): State<Shared>, ctx: Ctx) -> Response {
+#[derive(serde::Deserialize)]
+struct DayQuery {
+    day: Option<String>,
+}
+
+/// Hoje: ao vivo, da memória. Outro dia (`?day=AAAA-MM-DD`): do histórico em disco.
+async fn activity_page(State(app): State<Shared>, ctx: Ctx, Query(q): Query<DayQuery>) -> Response {
     let snap = app.monitor.snapshot();
-    let body = views::activity_body(&snap);
-    page(&app, &ctx, n_("Atividade"), "activity", "activity", body).into_response()
+    let today = views::now_local().date();
+    let history = app.monitor.history();
+    let day = q.day.as_deref().and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).filter(|d| *d < today);
+    let nav = |d| match history {
+        Some(h) => views::day_nav(d, today, h.first_day()),
+        None => html! {},
+    };
+    match (day, history) {
+        (Some(d), Some(h)) => {
+            let events = h.day(d, 5000);
+            let body = views::activity_day_body(&events, d, nav(d));
+            page(&app, &ctx, n_("Atividade"), "activity", "other", body).into_response()
+        }
+        _ => {
+            let body = views::activity_body(&snap, nav(today));
+            page(&app, &ctx, n_("Atividade"), "activity", "activity", body).into_response()
+        }
+    }
 }
 
 async fn leases_page(State(app): State<Shared>, ctx: Ctx) -> Response {
@@ -832,7 +854,10 @@ fn device_body(app: &App, ctx: &Ctx, mac: &str, info: &DeviceInfo, err: Option<&
     let res = dhcp::reservations(&current_doc(app)).into_iter().find(|r| r.mac == mac);
     let hostname = lease.map(|l| l.hostname.clone()).filter(|h| !h.is_empty()).or_else(|| res.as_ref().and_then(|r| r.hostname.clone()));
     let name = (!info.alias.is_empty()).then(|| info.alias.clone()).or(hostname.clone()).unwrap_or_else(|| mac.to_string());
-    let events: Vec<&crate::events::Event> = snap.events.iter().rev().filter(|e| e.mac.as_deref() == Some(mac)).take(200).collect();
+    let events: Vec<crate::events::Event> = match app.monitor.history() {
+        Some(h) => h.by_mac(mac, 200),
+        None => snap.events.iter().rev().filter(|e| e.mac.as_deref() == Some(mac)).take(200).cloned().collect(),
+    };
     html! {
         (error_box(err))
         section.grid.g-2 {
@@ -895,7 +920,7 @@ fn device_body(app: &App, ctx: &Ctx, mac: &str, info: &DeviceInfo, err: Option<&
         section.card {
             div.card-head { h2.card-title { (t("Histórico")) } }
             @if events.is_empty() {
-                p.empty { (t("Nenhum evento deste dispositivo no histórico em memória.")) }
+                p.empty { (t("Nenhum evento deste dispositivo no histórico.")) }
             } @else {
                 div.table-wrap {
                     table {
@@ -913,7 +938,14 @@ fn device_body(app: &App, ctx: &Ctx, mac: &str, info: &DeviceInfo, err: Option<&
                     }
                 }
             }
-            p.hint { (t("O histórico vem dos eventos do log que o painel guarda em memória (os mais recentes).")) }
+            p.hint {
+                @if app.monitor.history().is_some() {
+                    @if app.cfg.history_days == 0 { (t("Histórico guardado em disco pelo painel (sem limite de dias).")) }
+                    @else { (tf!("Histórico guardado em disco pelo painel (últimos {} dias).", app.cfg.history_days)) }
+                } @else {
+                    (t("O histórico vem dos eventos do log que o painel guarda em memória (os mais recentes)."))
+                }
+            }
         }
     }
 }

@@ -31,6 +31,9 @@ pub struct Config {
     /// painel procura nos caminhos comuns (pacotes hwdata/ieee-data).
     #[serde(default)]
     pub oui_file: Option<PathBuf>,
+    /// Quantos dias de eventos o histórico guarda (0 = tudo).
+    #[serde(default = "default_history_days")]
+    pub history_days: u32,
     /// Marque `true` quando o painel estiver atrás de HTTPS (cookie só via TLS).
     #[serde(default)]
     pub secure_cookie: bool,
@@ -74,6 +77,9 @@ fn default_state() -> PathBuf {
 }
 fn default_backup_dir() -> PathBuf {
     "/var/lib/opendhcp-panel/backups".into()
+}
+fn default_history_days() -> u32 {
+    90
 }
 fn default_data_dir() -> PathBuf {
     "/var/lib/opendhcp-panel".into()

@@ -5,6 +5,8 @@
 
 use chrono::{DateTime, Local};
 
+use std::collections::HashMap;
+
 use crate::i18n::Msg;
 
 /// Botão opcional da notificação.
@@ -57,7 +59,15 @@ impl Note {
 const MAX_RESOLVED: usize = 50;
 
 /// Atualiza a lista com os alertas de agora. Devolve `true` se algo mudou.
-pub fn sync(notes: &mut Vec<Note>, alerts: Vec<Alert>, now: DateTime<Local>, next_id: &mut u64) -> bool {
+/// `remembered` (chave → rev) são notificações fechadas antes de o painel reiniciar: se a mesma
+/// situação ainda estiver acontecendo, a notificação já nasce fechada.
+pub fn sync(
+    notes: &mut Vec<Note>,
+    alerts: Vec<Alert>,
+    now: DateTime<Local>,
+    next_id: &mut u64,
+    remembered: &HashMap<String, String>,
+) -> bool {
     let before = notes.clone();
     for a in alerts.iter() {
         match notes.iter_mut().find(|n| n.active() && n.alert.key == a.key) {
@@ -70,7 +80,8 @@ pub fn sync(notes: &mut Vec<Note>, alerts: Vec<Alert>, now: DateTime<Local>, nex
             }
             None => {
                 *next_id += 1;
-                notes.push(Note { id: *next_id, alert: a.clone(), since: now, resolved: None, dismissed: false });
+                let dismissed = remembered.get(&a.key) == Some(&a.rev);
+                notes.push(Note { id: *next_id, alert: a.clone(), since: now, resolved: None, dismissed });
             }
         }
     }
@@ -121,25 +132,37 @@ mod tests {
     fn ciclo_de_vida() {
         let now = Local::now();
         let (mut notes, mut id) = (Vec::new(), 0);
-        assert!(sync(&mut notes, vec![a("svc", "")], now, &mut id));
+        assert!(sync(&mut notes, vec![a("svc", "")], now, &mut id, &HashMap::new()));
         assert_eq!(notes.len(), 1);
         // fechada: não volta enquanto a situação for a mesma
         assert!(dismiss(&mut notes, Some(1)));
-        sync(&mut notes, vec![a("svc", "")], now, &mut id);
+        sync(&mut notes, vec![a("svc", "")], now, &mut id, &HashMap::new());
         assert!(notes.iter().all(|n| !n.visible()));
         // ocorrência nova da mesma situação: volta
-        sync(&mut notes, vec![a("svc", "2")], now, &mut id);
+        sync(&mut notes, vec![a("svc", "2")], now, &mut id, &HashMap::new());
         assert_eq!(notes.iter().filter(|n| n.visible()).count(), 1);
         // resolveu: fica como resolvida até fechar
-        sync(&mut notes, vec![], now, &mut id);
+        sync(&mut notes, vec![], now, &mut id, &HashMap::new());
         assert!(notes[0].visible() && !notes[0].active());
         assert!(dismiss(&mut notes, None));
         assert!(notes.is_empty());
         // fechada, resolvida e começou de novo: notificação nova
-        sync(&mut notes, vec![a("svc", "")], now, &mut id);
+        sync(&mut notes, vec![a("svc", "")], now, &mut id, &HashMap::new());
         dismiss(&mut notes, None);
-        sync(&mut notes, vec![], now, &mut id);
-        sync(&mut notes, vec![a("svc", "")], now, &mut id);
+        sync(&mut notes, vec![], now, &mut id, &HashMap::new());
+        sync(&mut notes, vec![a("svc", "")], now, &mut id, &HashMap::new());
         assert_eq!(notes.iter().filter(|n| n.visible()).count(), 1);
+    }
+
+    #[test]
+    fn fechada_antes_de_reiniciar_continua_fechada() {
+        let now = Local::now();
+        let remembered: HashMap<String, String> = [("svc".to_string(), "1".to_string())].into();
+        let (mut notes, mut id) = (Vec::new(), 0);
+        sync(&mut notes, vec![a("svc", "1")], now, &mut id, &remembered);
+        assert!(!notes[0].visible(), "mesma situação: já nasce fechada");
+        let (mut notes, mut id) = (Vec::new(), 0);
+        sync(&mut notes, vec![a("svc", "2")], now, &mut id, &remembered);
+        assert!(notes[0].visible(), "ocorrência nova: aparece");
     }
 }
