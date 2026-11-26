@@ -352,6 +352,7 @@ const NAV: [(&str, &[NavItem]); 3] = [
     ]),
     (n_("Sistema"), &[
         ("/account", "account", n_("Minha conta"), "lock"),
+        ("/maintenance", "maintenance", n_("Manutenção"), "power"),
     ]),
 ];
 

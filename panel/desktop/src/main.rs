@@ -33,6 +33,8 @@ enum Target {
     Offline(String),
     /// Linux sem o servidor DHCP instalado: oferecer instalar o que vem dentro do aplicativo.
     Install { config: PathBuf },
+    /// Servidor instalado por este aplicativo, mas de outra versão: oferecer atualizar.
+    Update(String),
     /// O opendhcp.ini não existe e criar exige permissão de administrador.
     MissingIni { ini: PathBuf, config: PathBuf },
     /// Não deu para iniciar o painel embutido.
@@ -48,8 +50,8 @@ enum StartError {
 enum UserEvent {
     /// Pedido da tela de aviso (botões).
     Ipc(String),
-    /// O serviço respondeu (ou desistimos de esperar).
-    Reachable(String, bool),
+    /// O serviço do painel ficou no ar (ou o motivo de não ter ficado).
+    Reachable(String, Result<(), String>),
     /// Arquivo baixado (ex.: exportar CSV).
     Downloaded(PathBuf),
     /// Resultado de criar o .ini e subir o painel embutido de novo.
@@ -116,6 +118,39 @@ fn tr(key: &str) -> &'static str {
             "opendhcp.ini no existe en esta carpeta. Puedo crearlo con la configuración predeterminada de Open DHCP (después ajusta rangos y opciones en el panel). La carpeta es del sistema, así que se pedirá la contraseña de administrador.",
         ],
         "create" => ["Criar o arquivo", "Create the file", "Créer le fichier", "Crear el archivo"],
+        "busy_title" => [
+            "A porta do painel está ocupada por outro programa",
+            "The panel's port is used by another program",
+            "Le port du panneau est utilisé par un autre programme",
+            "El puerto del panel está ocupado por otro programa",
+        ],
+        "busy_text" => [
+            "O serviço opendhcp-panel não conseguiu abrir a porta abaixo porque outro programa já a usa. Feche esse programa (ou mude o listen no panel.toml) e tente de novo.",
+            "The opendhcp-panel service could not open the port below because another program already uses it. Close that program (or change listen in panel.toml) and try again.",
+            "Le service opendhcp-panel n'a pas pu ouvrir le port ci-dessous, déjà utilisé par un autre programme. Fermez ce programme (ou changez listen dans panel.toml) puis réessayez.",
+            "El servicio opendhcp-panel no pudo abrir el puerto de abajo porque otro programa ya lo usa. Cierre ese programa (o cambie listen en panel.toml) y vuelva a intentarlo.",
+        ],
+        "busy_short" => [
+            "A porta do painel está ocupada por outro programa:",
+            "The panel's port is used by another program:",
+            "Le port du panneau est utilisé par un autre programme :",
+            "El puerto del panel está ocupado por otro programa:",
+        ],
+        "update_title" => [
+            "Há uma versão nova do servidor DHCP",
+            "A new version of the DHCP server is available",
+            "Une nouvelle version du serveur DHCP est disponible",
+            "Hay una versión nueva del servidor DHCP",
+        ],
+        "update_text" => [
+            "O servidor DHCP e o painel instalados neste computador são de outra versão. Posso atualizá-los com os deste aplicativo; a configuração, os leases e a senha são mantidos. Será pedida a senha de administrador, e o servidor DHCP, se estiver rodando, reinicia.",
+            "The DHCP server and panel installed on this computer are a different version. I can update them with the ones in this app; the configuration, leases and password are kept. The administrator password will be asked, and the DHCP server restarts if it is running.",
+            "Le serveur DHCP et le panneau installés sur cet ordinateur sont d'une autre version. Je peux les mettre à jour avec ceux de cette application ; la configuration, les baux et le mot de passe sont conservés. Le mot de passe administrateur sera demandé, et le serveur DHCP redémarre s'il est lancé.",
+            "El servidor DHCP y el panel instalados en este equipo son de otra versión. Puedo actualizarlos con los de esta aplicación; se mantienen la configuración, las concesiones y la contraseña. Se pedirá la contraseña de administrador, y el servidor DHCP se reinicia si está en ejecución.",
+        ],
+        "update" => ["Atualizar", "Update", "Mettre à jour", "Actualizar"],
+        "updating" => ["Atualizando…", "Updating…", "Mise à jour…", "Actualizando…"],
+        "later" => ["Agora não", "Not now", "Pas maintenant", "Ahora no"],
         "install_title" => [
             "O servidor DHCP não está instalado",
             "The DHCP server is not installed",
@@ -183,7 +218,7 @@ button:disabled {{ opacity:.6; cursor:wait; }}
 #msg {{ margin-top:1rem; font-size:.85rem; color:#e6533c; }}
 </style></head><body><div class="card"><div class="logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"><path d="M12 18h.01M9.17 15.17a4 4 0 0 1 5.66 0M6.34 12.34a8 8 0 0 1 11.31 0M3.51 9.51a12 12 0 0 1 16.97 0"/></svg></div><h1>{}</h1><p>{}</p><code>{}</code>
 <div class="actions">{buttons}</div><div id="msg"></div></div>
-<script>function go(a, b) {{ if (a === 'start' || a === 'create' || a === 'install') {{ b.disabled = true; b.textContent = a === 'start' ? {} : a === 'create' ? {} : {}; }} window.ipc.postMessage(a); }}</script>
+<script>function go(a, b) {{ if (a === 'start' || a === 'create' || a === 'install' || a === 'update') {{ b.disabled = true; b.textContent = a === 'start' ? {} : a === 'create' ? {} : a === 'install' ? {} : {}; }} window.ipc.postMessage(a); }}</script>
 </body></html>"#,
         esc(title),
         esc(text),
@@ -191,6 +226,7 @@ button:disabled {{ opacity:.6; cursor:wait; }}
         serde_quote(tr("starting")),
         serde_quote(tr("creating")),
         serde_quote(tr("installing")),
+        serde_quote(tr("updating")),
     )
 }
 
@@ -229,6 +265,55 @@ fn url_from_config(path: &Path) -> Option<String> {
 /// da senha): sem permissão de leitura, vale o endereço padrão do serviço.
 fn system_url() -> String {
     url_from_config(Path::new(SYSTEM_CONFIG)).unwrap_or_else(|| "http://127.0.0.1:8067/".to_string())
+}
+
+/// `systemctl is-active opendhcp-panel` (None fora do Linux ou sem systemctl).
+fn panel_service_active() -> Option<bool> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "opendhcp-panel.service"])
+        .status()
+        .ok()
+        .map(|s| s.success())
+}
+
+/// Algo responde no endereço do painel, mas o serviço está parado: é outro programa na porta.
+fn port_busy(url: &str) -> bool {
+    panel_service_active() == Some(false) && reachable(url)
+}
+
+/// Espera o serviço do painel ficar ativo e responder (`tries` × 0,5 s). Confere o systemd e não
+/// só a porta: outro programa na mesma porta responderia, mas não seria o painel instalado.
+fn wait_service(url: &str, tries: u32) -> Result<(), String> {
+    for i in 0..tries {
+        if panel_service_active() != Some(false) && reachable(url) {
+            return Ok(());
+        }
+        if i + 1 < tries {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    Err(if port_busy(url) { format!("{} {}", tr("busy_short"), host_of(url)) } else { tr("still_off").to_string() })
+}
+
+fn host_of(url: &str) -> &str {
+    url.trim_start_matches("http://").trim_start_matches("https://").split('/').next().unwrap_or(url)
+}
+
+/// O servidor foi instalado por este aplicativo (/usr/local/bin) e os binários diferem dos que
+/// vêm com ele.
+fn server_outdated(payload: &Path) -> bool {
+    let installed = Path::new("/usr/local/bin/opendhcp-panel");
+    if !installed.exists() {
+        return false;
+    }
+    let differs = |a: &Path, b: &Path| match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x != y,
+        _ => false,
+    };
+    differs(installed, &payload.join("opendhcp-panel")) || differs(Path::new("/opt/opendhcp/opendhcpd"), &payload.join("opendhcpd"))
 }
 
 fn reachable(url: &str) -> bool {
@@ -447,7 +532,10 @@ if command -v restorecon >/dev/null 2>&1; then
   restorecon -R /opt/opendhcp /usr/local/bin/opendhcp-panel /etc/opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp-panel /etc/systemd/system/opendhcp.service /etc/systemd/system/opendhcp-panel.service || true
 fi
 systemctl daemon-reload
-systemctl enable --now opendhcp-panel.service
+systemctl enable opendhcp-panel.service
+# numa atualização, os serviços passam a usar os binários novos
+systemctl restart opendhcp-panel.service
+systemctl try-restart opendhcp.service
 "#;
         let mut child = std::process::Command::new("pkexec")
             .args(["sh", "-c", script])
@@ -479,7 +567,10 @@ fn resolve() -> Target {
     let system = Path::new(SYSTEM_CONFIG);
     if arg("--config").is_none() && cfg!(unix) && system.exists() {
         let url = system_url();
-        return if reachable(&url) { Target::Url(url) } else { Target::Offline(url) };
+        if cfg!(target_os = "linux") && server_payload().is_some_and(|p| server_outdated(&p)) {
+            return Target::Update(url);
+        }
+        return if wait_service(&url, 1).is_ok() { Target::Url(url) } else { Target::Offline(url) };
     }
     let config = match arg("--config").map(PathBuf::from).map(Ok).unwrap_or_else(user_config) {
         Ok(c) => c,
@@ -588,6 +679,7 @@ fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEve
     builder = match target {
         Target::Url(url) => builder.with_url(url),
         Target::Offline(url) => builder.with_html(offline_html(url)),
+        Target::Update(_) => builder.with_html(update_html()),
         Target::MissingIni { ini, .. } => builder.with_html(missing_html(ini)),
         Target::Install { .. } => builder.with_html(install_html()),
         Target::Failed { error, config } => builder.with_html(failed_html(error, config)),
@@ -606,8 +698,15 @@ fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEve
 }
 
 fn offline_html(url: &str) -> String {
+    if port_busy(url) {
+        return notice_page(tr("busy_title"), tr("busy_text"), host_of(url), &[("retry", tr("retry"), true)]);
+    }
     let start = if cfg!(unix) { vec![("start", tr("start"), true), ("retry", tr("retry"), false)] } else { vec![("retry", tr("retry"), true)] };
     notice_page(tr("offline_title"), tr("offline_text"), url, &start)
+}
+
+fn update_html() -> String {
+    notice_page(tr("update_title"), tr("update_text"), "/opt/opendhcp · /usr/local/bin/opendhcp-panel", &[("update", tr("update"), true), ("later", tr("later"), false)])
 }
 
 fn missing_html(ini: &Path) -> String {
@@ -624,17 +723,11 @@ fn failed_html(error: &str, config: &Path) -> String {
     notice_page(tr("failed_title"), &text, &config.display().to_string(), &[("open_config", tr("open_config"), true)])
 }
 
-/// Espera o serviço responder (até ~20 s) sem travar a janela.
+/// Espera o serviço do painel (até ~20 s) sem travar a janela.
 fn wait_reachable(url: String, proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || {
-        for _ in 0..40 {
-            if reachable(&url) {
-                let _ = proxy.send_event(UserEvent::Reachable(url, true));
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        let _ = proxy.send_event(UserEvent::Reachable(url, false));
+        let result = wait_service(&url, 40);
+        let _ = proxy.send_event(UserEvent::Reachable(url, result));
     });
 }
 
@@ -661,13 +754,13 @@ fn main() {
     let guard = Arc::new(Mutex::new(Guard {
         notice: !matches!(target, Target::Url(_)),
         origin: match &target {
-            Target::Url(u) | Target::Offline(u) => origin_of(u),
+            Target::Url(u) | Target::Offline(u) | Target::Update(u) => origin_of(u),
             _ => None,
         },
     }));
     let webview = build_webview(&window, &target, proxy.clone(), guard.clone()).expect("não consegui criar o WebView");
     let mut offline_url = match &target {
-        Target::Offline(url) => Some(url.clone()),
+        Target::Offline(url) | Target::Update(url) => Some(url.clone()),
         _ => None,
     };
     let failed_config = match &target {
@@ -710,23 +803,22 @@ fn main() {
                         });
                     }
                 }
-                "install" => {
+                "install" | "update" => {
                     if let Some(payload) = server_payload() {
                         let proxy = proxy.clone();
                         std::thread::spawn(move || {
                             let result = install_server(&payload).and_then(|_| {
                                 let url = system_url();
                                 // espera o serviço do painel subir (até ~20 s)
-                                for _ in 0..40 {
-                                    if reachable(&url) {
-                                        return Ok(url);
-                                    }
-                                    std::thread::sleep(Duration::from_millis(500));
-                                }
-                                Err("opendhcp-panel.service".to_string())
+                                wait_service(&url, 40).map(|_| url)
                             });
                             let _ = proxy.send_event(UserEvent::Installed(result));
                         });
+                    }
+                }
+                "later" => {
+                    if let Some(url) = &offline_url {
+                        wait_reachable(url.clone(), proxy.clone());
                     }
                 }
                 "skip" => {
@@ -751,13 +843,13 @@ fn main() {
                 }
                 _ => {}
             },
-            Event::UserEvent(UserEvent::Reachable(url, true)) => {
+            Event::UserEvent(UserEvent::Reachable(url, Ok(()))) => {
                 *guard.lock().unwrap() = Guard { notice: false, origin: origin_of(&url) };
                 offline_url = None;
                 let _ = webview.load_url(&url);
             }
-            Event::UserEvent(UserEvent::Reachable(_, false)) => {
-                let msg = serde_quote(tr("still_off"));
+            Event::UserEvent(UserEvent::Reachable(_, Err(e))) => {
+                let msg = serde_quote(&e);
                 let _ = webview.evaluate_script(&format!(
                     "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => b.disabled = false);"
                 ));
@@ -775,11 +867,12 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Installed(Ok(url))) => {
                 *guard.lock().unwrap() = Guard { notice: false, origin: origin_of(&url) };
+                offline_url = None;
                 let _ = webview.load_url(&url);
             }
             Event::UserEvent(UserEvent::Installed(Err(e))) => {
                 let msg = serde_quote(&format!("{} {e}", tr("install_failed")));
-                let label = serde_quote(tr("install"));
+                let label = serde_quote(if offline_url.is_some() { tr("update") } else { tr("install") });
                 let _ = webview.evaluate_script(&format!(
                     "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => {{ b.disabled = false; }}); document.querySelector('button.primary').textContent = {label};"
                 ));

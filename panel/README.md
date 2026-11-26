@@ -85,7 +85,21 @@ O `.AppImage` leva o `opendhcpd` e o `opendhcp-panel` dentro. Na primeira vez qu
 sem o servidor instalado, o aplicativo oferece instalá-lo (pede a senha de administrador uma vez,
 via `pkexec`): `opendhcpd` em `/opt/opendhcp`, `opendhcp-panel` em `/usr/local/bin`, as duas units
 em `/etc/systemd/system` e a configuração em `/etc/opendhcp-panel`, sem sobrescrever arquivos que
-já existam. Quem preferir não instalar pode continuar com o painel embutido.
+já existam. Quem preferir não instalar pode continuar com o painel embutido. Quando o servidor instalado
+pelo aplicativo é de outra versão, o aplicativo oferece atualizá-lo (mantém configuração, leases e
+senha).
+
+## Manutenção
+
+Em **Sistema → Manutenção**, com a senha atual:
+
+- **Restaurar padrões:** o `opendhcp.ini` volta ao padrão (o atual vai para os backups), os leases
+  são apagados, o servidor DHCP é parado e o login volta para `admin`/`admin`, com troca obrigatória.
+  Apelidos, histórico e backups ficam.
+- **Desinstalar:** no serviço instalado pelo aplicativo (AppImage) ou pelo `install.sh`, remove o
+  servidor, o painel, o aplicativo e as units, opcionalmente também a configuração, os leases e os
+  backups. A remoção roda numa unit transitória (`systemd-run`), fora do isolamento do painel.
+  Instalado por `.deb`/`.rpm`, a página mostra o comando do gerenciador de pacotes.
 
 ## Instalação manual
 
