@@ -903,7 +903,7 @@ fn device_body(app: &App, ctx: &Ctx, mac: &str, info: &DeviceInfo, err: Option<&
                         tbody {
                             @for e in &events {
                                 tr {
-                                    td.nowrap { (e.ts.map(|t| t.format("%d/%m %H:%M:%S").to_string()).unwrap_or_default()) " " span.muted.small { (views::ago_pub(e.ts, now_l)) } }
+                                    td.nowrap { (e.ts.map(|t| t.format(i18n::date_fmt(i18n::DateStyle::ShortSecs)).to_string()).unwrap_or_default()) " " span.muted.small { (views::ago_pub(e.ts, now_l)) } }
                                     td { span.tag.(e.kind.tone()) { (e.kind.label()) } }
                                     td { (crate::events::describe(e)) }
                                     td.mono { @if !matches!(e.kind, crate::events::Kind::NoRange) { (e.ip.as_deref().unwrap_or("")) } }

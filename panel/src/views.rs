@@ -12,7 +12,7 @@ use crate::events::{self, Event, Kind};
 use crate::ini::IniDoc;
 use crate::leases::{self, Lease};
 use crate::monitor::Snapshot;
-use crate::i18n::{self, n_, t, tm};
+use crate::i18n::{self, n_, t, tm, DateStyle};
 use crate::notes::{Alert, Note, NoteAction};
 use crate::{msg, tf};
 use crate::service::Status;
@@ -72,7 +72,7 @@ pub fn fmt_expiry(exp: i64, now: i64) -> (String, String) {
         return (t("Sem expiração").into(), String::new());
     }
     let when = chrono::DateTime::from_timestamp(exp, 0)
-        .map(|d| d.with_timezone(&chrono::Local).format("%d/%m %H:%M").to_string())
+        .map(|d| d.with_timezone(&chrono::Local).format(i18n::date_fmt(DateStyle::Short)).to_string())
         .unwrap_or_default();
     let left = exp - now;
     let rel = if left <= 0 {
@@ -99,7 +99,7 @@ fn ago(ts: Option<NaiveDateTime>, now: NaiveDateTime) -> String {
     let Some(ts) = ts else { return String::new() };
     let s = (now - ts).num_seconds();
     if s < 0 {
-        ts.format("%d/%m %H:%M:%S").to_string()
+        ts.format(i18n::date_fmt(DateStyle::ShortSecs)).to_string()
     } else if s < 10 {
         t("agora").into()
     } else if s < 60 {
@@ -109,7 +109,7 @@ fn ago(ts: Option<NaiveDateTime>, now: NaiveDateTime) -> String {
     } else if s < 86400 {
         tf!("há {}h", s / 3600)
     } else {
-        ts.format("%d/%m %H:%M").to_string()
+        ts.format(i18n::date_fmt(DateStyle::Short)).to_string()
     }
 }
 
@@ -527,7 +527,7 @@ fn note_item(n: &Note, csrf: &str) -> Markup {
                 p { (n.alert.msg.render()) }
                 span.muted.small {
                     @if let Some(r) = n.resolved { (tf!("Resolvido às {}", r.format("%H:%M"))) }
-                    @else { (tf!("Desde {}", n.since.format("%d/%m %H:%M"))) }
+                    @else { (tf!("Desde {}", n.since.format(i18n::date_fmt(DateStyle::Short)))) }
                 }
                 @if n.active() { div.note-act { (note_action(&n.alert, csrf, true)) } }
             }
@@ -836,7 +836,7 @@ pub fn frag_feed(snap: &Snapshot) -> Markup {
                         @for e in snap.events.iter().rev().take(400) {
                             @let kind_key = if e.kind == Kind::Renew { "renew" } else { e.kind.tone() };
                             tr data-kind=(kind_key) {
-                                td.nowrap title=[e.ts.map(|t| t.format("%d/%m/%Y %H:%M:%S").to_string())] {
+                                td.nowrap title=[e.ts.map(|t| t.format(i18n::date_fmt(DateStyle::Full)).to_string())] {
                                     (e.ts.map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default())
                                     " " span.muted.small { (ago(e.ts, now)) }
                                 }
