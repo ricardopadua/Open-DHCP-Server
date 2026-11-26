@@ -11,7 +11,9 @@ use crate::events::{self, Event, Kind};
 use crate::ini::IniDoc;
 use crate::leases::{self, Lease};
 use crate::monitor::Snapshot;
+use crate::i18n::{self, n_, t, tm};
 use crate::notes::{Alert, Note, NoteAction};
+use crate::{msg, tf};
 use crate::service::Status;
 
 // ---------- ícones (traço 24x24, estilo Tabler) ----------
@@ -41,6 +43,7 @@ pub fn icon(name: &str) -> Markup {
         "edit" => "M4 20h4L18.5 9.5a2.83 2.83 0 0 0-4-4L4 16v4M13.5 6.5l4 4",
         "bell" => "M10 5a2 2 0 1 1 4 0 7 7 0 0 1 4 6v3a4 4 0 0 0 2 3H4a4 4 0 0 0 2-3v-3a7 7 0 0 1 4-6M9 17v1a3 3 0 0 0 6 0v-1",
         "x" => "M18 6 6 18M6 6l12 12",
+        "globe" => "M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 0 0 0 18M12.5 3a17 17 0 0 1 0 18",
         "trash" => "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3",
         _ => "M12 12m-8 0a8 8 0 1 0 16 0 8 8 0 1 0-16 0",
     };
@@ -63,24 +66,24 @@ pub fn now_local() -> NaiveDateTime {
 
 pub fn fmt_expiry(exp: i64, now: i64) -> (String, String) {
     if exp >= leases::INFINITE {
-        return ("Sem expiração".into(), String::new());
+        return (t("Sem expiração").into(), String::new());
     }
     let when = chrono::DateTime::from_timestamp(exp, 0)
         .map(|d| d.with_timezone(&chrono::Local).format("%d/%m %H:%M").to_string())
         .unwrap_or_default();
     let left = exp - now;
     let rel = if left <= 0 {
-        "expirado".to_string()
+        t("expirado").to_string()
     } else if left < 60 {
-        "em menos de 1 min".to_string()
+        t("em menos de 1 min").to_string()
     } else if left < 3600 {
-        format!("em {} min", left / 60)
+        tf!("em {} min", left / 60)
     } else if left < 86400 {
-        format!("em {}h{:02}", left / 3600, (left % 3600) / 60)
+        tf!("em {}h{}", left / 3600, format!("{:02}", (left % 3600) / 60))
     } else if left < 2 * 86400 {
-        "em 1 dia".to_string()
+        t("em 1 dia").to_string()
     } else {
-        format!("em {} dias", left / 86400)
+        tf!("em {} dias", left / 86400)
     };
     (when, rel)
 }
@@ -91,13 +94,13 @@ fn ago(ts: Option<NaiveDateTime>, now: NaiveDateTime) -> String {
     if s < 0 {
         ts.format("%d/%m %H:%M:%S").to_string()
     } else if s < 10 {
-        "agora".into()
+        t("agora").into()
     } else if s < 60 {
-        format!("há {s} s")
+        tf!("há {} s", s)
     } else if s < 3600 {
-        format!("há {} min", s / 60)
+        tf!("há {} min", s / 60)
     } else if s < 86400 {
-        format!("há {}h", s / 3600)
+        tf!("há {}h", s / 3600)
     } else {
         ts.format("%d/%m %H:%M").to_string()
     }
@@ -115,9 +118,9 @@ pub fn csrf_input(csrf: &str) -> Markup {
 
 pub fn status_badge(s: Status) -> Markup {
     let (cls, txt) = match s {
-        Status::Running => ("ok", "Em execução"),
-        Status::Stopped => ("bad", "Parado"),
-        Status::Unknown => ("warn", "Desconhecido"),
+        Status::Running => ("ok", t("Em execução")),
+        Status::Stopped => ("bad", t("Parado")),
+        Status::Unknown => ("warn", t("Desconhecido")),
     };
     html! { span.badge.(cls) { span.dot {} (txt) } }
 }
@@ -127,7 +130,7 @@ pub fn usage_bar(used: u64, total: u64) -> Markup {
     let pct = if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
     let tone = if pct >= 90.0 { "bad" } else if pct >= 75.0 { "warn" } else { "ok" };
     html! {
-        div.usage title=(format!("{pct:.1}% em uso")) {
+        div.usage title=(tf!("{}% em uso", format!("{pct:.1}"))) {
             svg.bar viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true" {
                 rect.track x="0" y="0" width="100" height="6" rx="3" {}
                 @if pct > 0.0 {
@@ -173,10 +176,10 @@ pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
     let mut out = Vec::new();
     match snap.status {
         Status::Stopped => out.push(Alert {
-            action: Some(NoteAction::Service("start", "Iniciar", "")),
-            ..Alert::new("svc-stopped", "bad", "O serviço DHCP está parado: nenhum dispositivo consegue pegar ou renovar IP.")
+            action: Some(NoteAction::Service("start", n_("Iniciar"), "")),
+            ..Alert::new("svc-stopped", "bad", msg!("O serviço DHCP está parado: nenhum dispositivo consegue pegar ou renovar IP."))
         }),
-        Status::Unknown => out.push(Alert::new("svc-unknown", "warn", "Não consegui consultar o estado do serviço DHCP.")),
+        Status::Unknown => out.push(Alert::new("svc-unknown", "warn", msg!("Não consegui consultar o estado do serviço DHCP."))),
         Status::Running => {}
     }
     for (k, e) in [("ini-error", &snap.ini_error), ("lease-error", &snap.lease_error)] {
@@ -190,11 +193,11 @@ pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
             let tone = if pct >= 90.0 { "bad" } else { "warn" };
             out.push(Alert {
                 rev: tone.into(), // passou de 80% para 90%: avisa de novo
-                action: Some(NoteAction::Link("/ranges", "Ver faixas")),
+                action: Some(NoteAction::Link("/ranges", n_("Ver faixas"))),
                 ..Alert::new(
                     format!("range:{}-{}", u.start, u.end),
                     tone,
-                    format!("A faixa {} – {} está com {pct:.0}% ocupada ({} livres).", u.start, u.end, u.total - u.used),
+                    msg!("A faixa {} – {} está com {}% ocupada ({} livres).", u.start, u.end, format!("{pct:.0}"), u.total - u.used),
                 )
             });
         }
@@ -203,11 +206,11 @@ pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
     if let Some(last) = nr.last() {
         out.push(Alert {
             rev: last.seq.to_string(),
-            action: Some(NoteAction::Link("/activity", "Ver atividade")),
+            action: Some(NoteAction::Link("/activity", n_("Ver atividade"))),
             ..Alert::new(
                 "norange",
                 "bad",
-                format!(
+                msg!(
                     "{} pedido(s) de IP sem faixa nos últimos 15 min (último: {} pela interface {}). Esses dispositivos estão sem rede.",
                     nr.len(),
                     last.mac.as_deref().unwrap_or("?"),
@@ -220,11 +223,11 @@ pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
     if let Some(last) = dc.last() {
         out.push(Alert {
             rev: last.seq.to_string(),
-            action: Some(NoteAction::Link("/activity", "Ver atividade")),
+            action: Some(NoteAction::Link("/activity", n_("Ver atividade"))),
             ..Alert::new(
                 "decline",
                 "warn",
-                format!(
+                msg!(
                     "{} conflito(s) de IP nos últimos 15 min (último: {} já estava em uso na rede).",
                     dc.len(),
                     last.ip.as_deref().unwrap_or("?")
@@ -274,35 +277,64 @@ pub struct Shell<'a> {
     pub user: &'a str,
     pub csrf: &'a str,
     pub flash: Option<(bool, &'a str)>,
+    /// Caminho da página (para voltar a ela depois de trocar o idioma).
+    pub here: &'a str,
 }
 
 /// (href, chave, rótulo, ícone)
 type NavItem = (&'static str, &'static str, &'static str, &'static str);
 
 const NAV: [(&str, &[NavItem]); 3] = [
-    ("Monitoramento", &[
-        ("/", "dashboard", "Visão geral", "home"),
-        ("/activity", "activity", "Atividade", "pulse"),
-        ("/leases", "leases", "Leases ativos", "devices"),
+    (n_("Monitoramento"), &[
+        ("/", "dashboard", n_("Visão geral"), "home"),
+        ("/activity", "activity", n_("Atividade"), "pulse"),
+        ("/leases", "leases", n_("Leases ativos"), "devices"),
     ]),
-    ("Configuração", &[
-        ("/reservations", "reservations", "Reservas", "pin"),
-        ("/ranges", "ranges", "Faixas", "ranges"),
-        ("/options", "options", "Opções globais", "settings"),
+    (n_("Configuração"), &[
+        ("/reservations", "reservations", n_("Reservas"), "pin"),
+        ("/ranges", "ranges", n_("Faixas"), "ranges"),
+        ("/options", "options", n_("Opções globais"), "settings"),
     ]),
-    ("Sistema", &[
-        ("/account", "account", "Minha conta", "lock"),
+    (n_("Sistema"), &[
+        ("/account", "account", n_("Minha conta"), "lock"),
     ]),
 ];
 
+/// Seletor de idioma (link GET que grava o cookie e volta para `here`).
+fn lang_menu(here: &str) -> Markup {
+    let cur = i18n::lang();
+    html! {
+        details.menu.lang-menu #lang {
+            summary.icon-btn.lang-btn aria-label=(t("Idioma")) title=(t("Idioma")) {
+                (icon("globe")) span.lang-code { (cur.code().to_uppercase()) }
+            }
+            div.menu-panel {
+                div.menu-head { strong { (t("Idioma")) } }
+                ul.menu-list {
+                    @for l in i18n::ALL {
+                        li {
+                            a.menu-item.active[l == cur] href={"/lang/" (l.code()) "?next=" (url_enc(here))} lang=(l.html()) {
+                                span.lang-code { (l.code().to_uppercase()) }
+                                span.grow { (l.name()) }
+                                @if l == cur { (icon("check")) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn shell(s: Shell, snap: &Snapshot, body: Markup) -> Markup {
+    let title = t(s.title);
     html! {
         (DOCTYPE)
-        html lang="pt-BR" {
+        html lang=(i18n::lang().html()) {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (s.title) " · Open DHCP" }
+                title { (title) " · Open DHCP" }
                 script src="/static/theme.js" {}
                 link rel="stylesheet" href="/static/style.css";
                 script src="/static/app.js" defer {}
@@ -312,64 +344,65 @@ pub fn shell(s: Shell, snap: &Snapshot, body: Markup) -> Markup {
                     aside.side #side {
                         a.brand href="/" {
                             span.logo { (icon("wifi")) }
-                            span { strong { "Open DHCP" } small { "Painel de controle" } }
+                            span { strong { "Open DHCP" } small { (t("Painel de controle")) } }
                         }
                         nav {
                             @for (group, items) in NAV {
-                                p.nav-group { (group) }
+                                p.nav-group { (t(group)) }
                                 @for (href, key, label, ic) in items.iter() {
                                     a.nav-item href=(href) class=[(s.nav == *key).then_some("active")] {
-                                        (icon(ic)) span { (label) }
+                                        (icon(ic)) span { (t(label)) }
                                     }
                                 }
                             }
                         }
                         div.side-foot {
                             div.side-card {
-                                span.muted.small { "Serviço DHCP" }
+                                span.muted.small { (t("Serviço DHCP")) }
                                 div #svc-badge { (status_badge(snap.status)) }
                             }
                         }
                     }
                     div.main {
                         header.topbar {
-                            button.icon-btn.menu-btn type="button" data-toggle="side" aria-label="Menu" { (icon("ranges")) }
+                            button.icon-btn.menu-btn type="button" data-toggle="side" aria-label=(t("Menu")) { (icon("ranges")) }
                             div.crumbs {
-                                span.muted { "Open DHCP" } span.sep { "/" } strong { (s.title) }
+                                span.muted { "Open DHCP" } span.sep { "/" } strong { (title) }
                             }
                             div.top-right {
+                                (lang_menu(s.here))
                                 details.notif #notif {
-                                    summary.icon-btn #notif-btn aria-label="Notificações" title="Notificações" { (frag_notif_btn(snap)) }
+                                    summary.icon-btn #notif-btn aria-label=(t("Notificações")) title=(t("Notificações")) { (frag_notif_btn(snap)) }
                                     div.notif-panel #notif-list { (frag_notif_list(snap, s.csrf)) }
                                 }
-                                button.icon-btn type="button" data-theme-toggle aria-label="Alternar tema" title="Alternar tema claro/escuro" {
+                                button.icon-btn type="button" data-theme-toggle aria-label=(t("Alternar tema")) title=(t("Alternar tema claro/escuro")) {
                                     span.only-light { (icon("moon")) } span.only-dark { (icon("sun")) }
                                 }
                                 div.user {
                                     span.avatar { (s.user.chars().next().unwrap_or('?').to_uppercase().to_string()) }
-                                    a.user-name href="/account" title="Minha conta" { (s.user) }
+                                    a.user-name href="/account" title=(t("Minha conta")) { (s.user) }
                                     form.inline method="post" action="/logout" {
                                         (csrf_input(s.csrf))
-                                        button.icon-btn type="submit" title="Sair" aria-label="Sair" { (icon("logout")) }
+                                        button.icon-btn type="submit" title=(t("Sair")) aria-label=(t("Sair")) { (icon("logout")) }
                                     }
                                 }
                             }
                         }
                         main.content {
                             div.page-head {
-                                h1 { (s.title) }
-                                span.muted.small #updated { "Atualizado às " (snap.updated.format("%H:%M:%S")) }
+                                h1 { (title) }
+                                span.muted.small #updated { (frag_updated(snap)) }
                             }
                             @if let Some((ok, text)) = s.flash {
                                 div.alert.row.(if ok { "ok" } else { "bad" }) role="status" {
                                     (icon(if ok { "check" } else { "alert" })) span.grow { (text) }
-                                    button.icon-btn.x type="button" data-close title="Fechar" aria-label="Fechar" { (icon("x")) }
+                                    button.icon-btn.x type="button" data-close title=(t("Fechar")) aria-label=(t("Fechar")) { (icon("x")) }
                                 }
                             }
                             div #alerts { (frag_alerts(snap, s.csrf)) }
                             (body)
                         }
-                        footer.foot { span.muted.small { "Open DHCP Server · painel " (env!("CARGO_PKG_VERSION")) } }
+                        footer.foot { span.muted.small { "Open DHCP Server · " (t("painel")) " " (env!("CARGO_PKG_VERSION")) } }
                     }
                 }
             }
@@ -390,11 +423,11 @@ fn note_action(a: &Alert, csrf: &str, small: bool) -> Markup {
     let cls = if small { "small" } else { "" };
     html! {
         @match &a.action {
-            Some(NoteAction::Link(href, label)) => a.btn.light.(cls) href=(href) { (label) },
+            Some(NoteAction::Link(href, label)) => a.btn.light.(cls) href=(href) { (t(label)) },
             Some(NoteAction::Service(act, label, confirm)) => {
-                form.inline method="post" action={"/service/" (act)} data-confirm=[(!confirm.is_empty()).then_some(*confirm)] {
+                form.inline method="post" action={"/service/" (act)} data-confirm=[(!confirm.is_empty()).then(|| t(confirm))] {
                     (csrf_input(csrf))
-                    button.btn.primary.(cls) type="submit" { (label) }
+                    button.btn.primary.(cls) type="submit" { (t(label)) }
                 }
             }
             None => {}
@@ -422,9 +455,9 @@ pub fn frag_alerts(snap: &Snapshot, csrf: &str) -> Markup {
         @for n in snap.notes.iter().filter(|n| n.visible() && n.active()) {
             div.alert.row.(n.alert.tone) role="alert" {
                 (icon("alert"))
-                span.grow { (n.alert.text) }
+                span.grow { (n.alert.msg.render()) }
                 (note_action(&n.alert, csrf, false))
-                (dismiss_button(Some(n.id), csrf, "Fechar", "x"))
+                (dismiss_button(Some(n.id), csrf, t("Fechar"), "x"))
             }
         }
     }
@@ -443,14 +476,14 @@ fn note_item(n: &Note, csrf: &str) -> Markup {
         li.note.(n.alert.tone) .resolved[!n.active()] {
             span.note-dot {}
             div.note-body {
-                p { (n.alert.text) }
+                p { (n.alert.msg.render()) }
                 span.muted.small {
-                    @if let Some(r) = n.resolved { "Resolvido às " (r.format("%H:%M")) }
-                    @else { "Desde " (n.since.format("%d/%m %H:%M")) }
+                    @if let Some(r) = n.resolved { (tf!("Resolvido às {}", r.format("%H:%M"))) }
+                    @else { (tf!("Desde {}", n.since.format("%d/%m %H:%M"))) }
                 }
                 @if n.active() { div.note-act { (note_action(&n.alert, csrf, true)) } }
             }
-            (dismiss_button(Some(n.id), csrf, "Marcar como lida", "x"))
+            (dismiss_button(Some(n.id), csrf, t("Marcar como lida"), "x"))
         }
     }
 }
@@ -459,11 +492,11 @@ pub fn frag_notif_list(snap: &Snapshot, csrf: &str) -> Markup {
     let list: Vec<&Note> = snap.notes.iter().rev().filter(|n| n.visible()).collect();
     html! {
         div.notif-head {
-            strong { "Notificações" }
-            @if !list.is_empty() { (dismiss_button(None, csrf, "Limpar todas", "")) }
+            strong { (t("Notificações")) }
+            @if !list.is_empty() { (dismiss_button(None, csrf, t("Limpar todas"), "")) }
         }
         @if list.is_empty() {
-            p.notif-empty.muted.small { (icon("check")) " Nenhuma notificação." }
+            p.notif-empty.muted.small { (icon("check")) " " (t("Nenhuma notificação.")) }
         } @else {
             ul.notes { @for n in list { (note_item(n, csrf)) } }
         }
@@ -471,7 +504,7 @@ pub fn frag_notif_list(snap: &Snapshot, csrf: &str) -> Markup {
 }
 
 pub fn frag_updated(snap: &Snapshot) -> Markup {
-    html! { "Atualizado às " (snap.updated.format("%H:%M:%S")) }
+    html! { (tf!("Atualizado às {}", snap.updated.format("%H:%M:%S"))) }
 }
 
 // ---------- visão geral ----------
@@ -483,24 +516,24 @@ pub fn dashboard_body(snap: &Snapshot, csrf: &str) -> Markup {
             div.card.hero #dash-service { (frag_dash_service(snap, csrf)) }
             div.card {
                 div.card-head {
-                    h2.card-title { "Atividade nas últimas 2 horas" }
-                    div.legend { span.lg.primary { "IP entregue" } span.lg.info { "Renovação" } span.lg.danger { "Problema" } }
+                    h2.card-title { (t("Atividade nas últimas 2 horas")) }
+                    div.legend { span.lg.primary { (t("IP entregue")) } span.lg.info { (t("Renovação")) } span.lg.danger { (t("Problema")) } }
                 }
                 div #dash-chart { (frag_dash_chart(snap)) }
             }
         }
         section.grid.g-8-4 {
             div.card {
-                div.card-head { h2.card-title { "Uso das faixas" } a.btn.light.small href="/ranges/new" { (icon("plus")) "Nova faixa" } }
+                div.card-head { h2.card-title { (t("Uso das faixas")) } a.btn.light.small href="/ranges/new" { (icon("plus")) (t("Nova faixa")) } }
                 div #dash-ranges { (frag_dash_ranges(snap)) }
             }
             div.card {
-                div.card-head { h2.card-title { "Ocupação geral" } }
+                div.card-head { h2.card-title { (t("Ocupação geral")) } }
                 div #dash-donut { (frag_dash_donut(snap)) }
             }
         }
         section.card {
-            div.card-head { h2.card-title { "Atividade recente" } a.btn.light.small href="/activity" { "Ver tudo" } }
+            div.card-head { h2.card-title { (t("Atividade recente")) } a.btn.light.small href="/activity" { (t("Ver tudo")) } }
             div #dash-feed { (frag_timeline(snap, 8)) }
         }
     }
@@ -533,21 +566,21 @@ pub fn frag_dash_kpis(snap: &Snapshot) -> Markup {
     let problems = last_hour.iter().filter(|e| matches!(e.kind, Kind::NoRange | Kind::Decline | Kind::Nak)).count();
     let fresh = snap.leases.iter().filter(|l| snap.fresh_kind(&l.mac) == Some(true)).count();
     html! {
-        (kpi("devices", "primary", "Dispositivos com IP", active.to_string(),
-            html! { @if fresh > 0 { span.up { "+" (fresh) " agora" } } @else { "leases ativos" } }, "/leases"))
-        (kpi("ranges", "success", "Endereços livres", total.saturating_sub(used).to_string(),
-            html! { "de " (total) " nas faixas" }, "/ranges"))
-        (kpi("pin", "info", "Reservas", reservations.to_string(), html! { "IPs fixos por MAC" }, "/reservations"))
-        (kpi("pulse", if problems > 0 { "danger" } else { "warning" }, "Eventos na última hora", last_hour.len().to_string(),
-            html! { (new_hour) " novos" @if problems > 0 { " · " span.down { (problems) " problema(s)" } } }, "/activity"))
+        (kpi("devices", "primary", t("Dispositivos com IP"), active.to_string(),
+            html! { @if fresh > 0 { span.up { (tf!("+{} agora", fresh)) } } @else { (t("leases ativos")) } }, "/leases"))
+        (kpi("ranges", "success", t("Endereços livres"), total.saturating_sub(used).to_string(),
+            html! { (tf!("de {} nas faixas", total)) }, "/ranges"))
+        (kpi("pin", "info", t("Reservas"), reservations.to_string(), html! { (t("IPs fixos por MAC")) }, "/reservations"))
+        (kpi("pulse", if problems > 0 { "danger" } else { "warning" }, t("Eventos na última hora"), last_hour.len().to_string(),
+            html! { (tf!("{} novos", new_hour)) @if problems > 0 { " · " span.down { (tf!("{} problema(s)", problems)) } } }, "/activity"))
     }
 }
 
 pub fn frag_dash_service(snap: &Snapshot, csrf: &str) -> Markup {
     let (title, text) = match snap.status {
-        Status::Running => ("Servidor DHCP ativo", "Atendendo pedidos de IP na rede."),
-        Status::Stopped => ("Servidor DHCP parado", "Nenhum dispositivo consegue pegar ou renovar IP."),
-        Status::Unknown => ("Estado desconhecido", "Não consegui consultar o serviço."),
+        Status::Running => (t("Servidor DHCP ativo"), t("Atendendo pedidos de IP na rede.")),
+        Status::Stopped => (t("Servidor DHCP parado"), t("Nenhum dispositivo consegue pegar ou renovar IP.")),
+        Status::Unknown => (t("Estado desconhecido"), t("Não consegui consultar o serviço.")),
     };
     let state = match snap.status {
         Status::Running => "on",
@@ -564,11 +597,11 @@ pub fn frag_dash_service(snap: &Snapshot, csrf: &str) -> Markup {
             p { (text) }
             div.hero-actions {
                 @if snap.status != Status::Running {
-                    (service_button(csrf, "start", "Iniciar", "white", "play", None))
+                    (service_button(csrf, "start", t("Iniciar"), "white", "play", None))
                 }
                 @if snap.status != Status::Stopped {
-                    (service_button(csrf, "restart", "Reiniciar", "white", "refresh", Some("Reiniciar o servidor DHCP?")))
-                    (service_button(csrf, "stop", "Parar", "ghost-white", "stop", Some("Parar o servidor DHCP? Os dispositivos não vão conseguir pegar nem renovar IP enquanto ele estiver parado.")))
+                    (service_button(csrf, "restart", t("Reiniciar"), "white", "refresh", Some(t("Reiniciar o servidor DHCP?"))))
+                    (service_button(csrf, "stop", t("Parar"), "ghost-white", "stop", Some(t("Parar o servidor DHCP? Os dispositivos não vão conseguir pegar nem renovar IP enquanto ele estiver parado."))))
                 }
             }
         }
@@ -577,7 +610,7 @@ pub fn frag_dash_service(snap: &Snapshot, csrf: &str) -> Markup {
 
 pub fn frag_dash_chart(snap: &Snapshot) -> Markup {
     if !snap.log.configured {
-        return html! { p.empty { "Configure "code { "log_file" } " no panel.toml para ver a atividade do servidor." } };
+        return html! { p.empty { (tm("Configure {} no panel.toml para ver a atividade do servidor.", &[html! { code { "log_file" } }])) } };
     }
     let now = now_local();
     let b = activity_buckets(snap, now);
@@ -590,7 +623,7 @@ pub fn frag_dash_chart(snap: &Snapshot) -> Markup {
         div.chart {
             div.chart-y { span { (max as u32) } span { (max as u32 / 2) } span { "0" } }
             div.chart-plot {
-                svg viewBox=(format!("0 0 {} {}", b.len() as f64 * w, h)) preserveAspectRatio="none" role="img" aria-label="Eventos por 5 minutos" {
+                svg viewBox=(format!("0 0 {} {}", b.len() as f64 * w, h)) preserveAspectRatio="none" role="img" aria-label=(t("Eventos por 5 minutos")) {
                     line.grid x1="0" x2="480" y1="0.5" y2="0.5" {}
                     line.grid x1="0" x2="480" y1=(h / 2.0) y2=(h / 2.0) {}
                     line.grid x1="0" x2="480" y1=(h - 0.5) y2=(h - 0.5) {}
@@ -600,7 +633,7 @@ pub fn frag_dash_chart(snap: &Snapshot) -> Markup {
                         @let hr = *r as f64 / max * h;
                         @let hp = *p as f64 / max * h;
                         g {
-                            title { (t.format("%H:%M")) " – " (a) " entregue(s), " (r) " renovação(ões), " (p) " problema(s)" }
+                            title { (tf!("{} – {} entregue(s), {} renovação(ões), {} problema(s)", t.format("%H:%M"), a, r, p)) }
                             rect.hit x=(i as f64 * w) y="0" width=(w) height=(h) {}
                             @if *r > 0 { rect.info x=(x) y=(h - hr) width=(w - gap) height=(hr) rx="2" {} }
                             @if *a > 0 { rect.primary x=(x) y=(h - hr - ha) width=(w - gap) height=(ha) rx="2" {} }
@@ -612,11 +645,11 @@ pub fn frag_dash_chart(snap: &Snapshot) -> Markup {
                     @for (i, (t, ..)) in b.iter().enumerate() {
                         @if i % 6 == 0 { span { (t.format("%H:%M")) } }
                     }
-                    span { "agora" }
+                    span { (i18n::t("agora")) }
                 }
             }
         }
-        @if total == 0 { p.muted.small.center { "Nenhum evento nas últimas 2 horas." } }
+        @if total == 0 { p.muted.small.center { (i18n::t("Nenhum evento nas últimas 2 horas.")) } }
     }
 }
 
@@ -624,11 +657,11 @@ pub fn frag_dash_ranges(snap: &Snapshot) -> Markup {
     let usage = range_usage(&snap.doc, &snap.leases, now_ts());
     html! {
         @if usage.is_empty() {
-            p.empty { "Nenhuma faixa dinâmica configurada." }
+            p.empty { (t("Nenhuma faixa dinâmica configurada.")) }
         } @else {
             div.table-wrap {
                 table {
-                    thead { tr { th { "Faixa" } th { "Conjunto" } th.num { "Em uso" } th.num { "Livres" } th.wide { "Ocupação" } } }
+                    thead { tr { th { (t("Faixa")) } th { (t("Conjunto")) } th.num { (t("Em uso")) } th.num { (t("Livres")) } th.wide { (t("Ocupação")) } } }
                     tbody {
                         @for u in &usage {
                             tr {
@@ -659,18 +692,18 @@ pub fn frag_dash_donut(snap: &Snapshot) -> Markup {
     let tone = if pct >= 90.0 { "bad" } else if pct >= 75.0 { "warn" } else { "ok" };
     html! {
         div.donut-wrap {
-            svg.donut viewBox="0 0 42 42" role="img" aria-label=(format!("{pct:.0}% ocupado")) {
+            svg.donut viewBox="0 0 42 42" role="img" aria-label=(tf!("{}% ocupado", format!("{pct:.0}"))) {
                 circle.track cx="21" cy="21" r="15.915" fill="none" stroke-width="5" {}
                 circle.(tone) cx="21" cy="21" r="15.915" fill="none" stroke-width="5"
                     stroke-dasharray=(format!("{:.2} {:.2}", pct, 100.0 - pct)) stroke-dashoffset="25"
                     stroke-linecap=(if pct >= 4.0 { "round" } else { "butt" }) {}
                 text.donut-num x="21" y="21" { (format!("{pct:.0}%")) }
-                text.donut-sub x="21" y="27" { "ocupado" }
+                text.donut-sub x="21" y="27" { (t("ocupado")) }
             }
             ul.donut-legend {
-                li { span.sw.(tone) {} "Em uso" strong { (used) } }
-                li { span.sw.track {} "Livres" strong { (total.saturating_sub(used)) } }
-                li { span.sw.info {} "Fora das faixas (reservas)" strong { (reserved_active) } }
+                li { span.sw.(tone) {} (t("Em uso")) strong { (used) } }
+                li { span.sw.track {} (t("Livres")) strong { (total.saturating_sub(used)) } }
+                li { span.sw.info {} (t("Fora das faixas (reservas)")) strong { (reserved_active) } }
             }
         }
     }
@@ -684,9 +717,9 @@ pub fn frag_timeline(snap: &Snapshot, limit: usize) -> Markup {
     let now = now_local();
     html! {
         @if !snap.log.configured {
-            p.empty { "Configure " code { "log_file" } " no panel.toml para acompanhar a atividade." }
+            p.empty { (tm("Configure {} no panel.toml para acompanhar a atividade.", &[html! { code { "log_file" } }])) }
         } @else if snap.events.is_empty() {
-            p.empty { "Nenhum evento registrado no log ainda." }
+            p.empty { (t("Nenhum evento registrado no log ainda.")) }
         } @else {
             ul.timeline {
                 @for e in snap.events.iter().rev().take(limit) {
@@ -710,16 +743,16 @@ pub fn activity_body(snap: &Snapshot) -> Markup {
         section.grid.kpis #act-stats { (frag_activity_stats(snap)) }
         section.card {
             div.card-head {
-                h2.card-title { "Eventos do servidor" }
+                h2.card-title { (t("Eventos do servidor")) }
                 div.row {
                     div.chips data-chips="#feed-table" {
-                        button.chip.active type="button" data-kind="" { "Todos" }
-                        button.chip type="button" data-kind="ok" { "Entregues" }
-                        button.chip type="button" data-kind="renew" { "Renovações" }
-                        button.chip type="button" data-kind="warn" { "Liberados" }
-                        button.chip type="button" data-kind="bad" { "Problemas" }
+                        button.chip.active type="button" data-kind="" { (t("Todos")) }
+                        button.chip type="button" data-kind="ok" { (t("Entregues")) }
+                        button.chip type="button" data-kind="renew" { (t("Renovações")) }
+                        button.chip type="button" data-kind="warn" { (t("Liberados")) }
+                        button.chip type="button" data-kind="bad" { (t("Problemas")) }
                     }
-                    label.search { (icon("search")) input type="search" placeholder="Filtrar por MAC, IP ou nome" data-filter="#feed-table" aria-label="Filtrar"; }
+                    label.search { (icon("search")) input type="search" placeholder=(t("Filtrar por MAC, IP ou nome")) data-filter="#feed-table" aria-label=(t("Filtrar")); }
                 }
             }
             div #feed { (frag_feed(snap)) }
@@ -733,10 +766,10 @@ pub fn frag_activity_stats(snap: &Snapshot) -> Markup {
     let last: Vec<&Event> = snap.events.iter().filter(|e| e.ts.is_some_and(|t| t >= hour_ago)).collect();
     let count = |ks: &[Kind]| last.iter().filter(|e| ks.contains(&e.kind)).count().to_string();
     html! {
-        (kpi("check", "success", "IPs entregues (1 h)", count(&[Kind::Allot]), html! { "novos dispositivos ou IPs" }, "/activity"))
-        (kpi("refresh", "info", "Renovações (1 h)", count(&[Kind::Renew]), html! { "dispositivos mantendo o IP" }, "/activity"))
-        (kpi("logout", "warning", "Liberados (1 h)", count(&[Kind::Release]), html! { "devolvidos pelos dispositivos" }, "/activity"))
-        (kpi("alert", "danger", "Problemas (1 h)", count(&[Kind::NoRange, Kind::Decline, Kind::Nak]), html! { "sem faixa, conflito ou recusa" }, "/activity"))
+        (kpi("check", "success", t("IPs entregues (1 h)"), count(&[Kind::Allot]), html! { (t("novos dispositivos ou IPs")) }, "/activity"))
+        (kpi("refresh", "info", t("Renovações (1 h)"), count(&[Kind::Renew]), html! { (t("dispositivos mantendo o IP")) }, "/activity"))
+        (kpi("logout", "warning", t("Liberados (1 h)"), count(&[Kind::Release]), html! { (t("devolvidos pelos dispositivos")) }, "/activity"))
+        (kpi("alert", "danger", t("Problemas (1 h)"), count(&[Kind::NoRange, Kind::Decline, Kind::Nak]), html! { (t("sem faixa, conflito ou recusa")) }, "/activity"))
     }
 }
 
@@ -744,13 +777,13 @@ pub fn frag_feed(snap: &Snapshot) -> Markup {
     let now = now_local();
     html! {
         @if !snap.log.configured {
-            p.empty { "O painel não está lendo o log do servidor. Configure " code { "log_file" } " no panel.toml (o mesmo caminho do " code { "-l" } " do opendhcpd)." }
+            p.empty { (tm("O painel não está lendo o log do servidor. Configure {} no panel.toml (o mesmo caminho do {} do opendhcpd).", &[html! { code { "log_file" } }, html! { code { "-l" } }])) }
         } @else if snap.events.is_empty() {
-            p.empty { "Nenhum evento no log ainda. Com " code { "LogLevel=Normal" } " o servidor registra IPs entregues, renovações e liberações; com " code { "All" } ", também as ofertas." }
+            p.empty { (tm("Nenhum evento no log ainda. Com {} o servidor registra IPs entregues, renovações e liberações; com {}, também as ofertas.", &[html! { code { "LogLevel=Normal" } }, html! { code { "All" } }])) }
         } @else {
             div.table-wrap {
                 table #feed-table {
-                    thead { tr { th { "Quando" } th { "Evento" } th { "Descrição" } th { "MAC" } th { "IP" } } }
+                    thead { tr { th { (t("Quando")) } th { (t("Evento")) } th { (t("Descrição")) } th { "MAC" } th { "IP" } } }
                     tbody {
                         @for e in snap.events.iter().rev().take(400) {
                             @let kind_key = if e.kind == Kind::Renew { "renew" } else { e.kind.tone() };
@@ -779,19 +812,19 @@ pub fn leases_body(snap: &Snapshot, csrf: &str, state_file: &str) -> Markup {
         section.card {
             div.card-head {
                 h2.card-title #lease-count { (frag_lease_count(snap)) }
-                label.search { (icon("search")) input type="search" placeholder="Filtrar por MAC, IP ou nome" data-filter="#lease-table" aria-label="Filtrar"; }
+                label.search { (icon("search")) input type="search" placeholder=(t("Filtrar por MAC, IP ou nome")) data-filter="#lease-table" aria-label=(t("Filtrar")); }
             }
             div #lease-wrap { (frag_lease_table(snap, csrf)) }
         }
         p.hint {
-            "Lidos de " code { (state_file) } " e atualizados sozinhos. Para liberar um lease, o painel para o serviço por alguns segundos, tira o dispositivo do arquivo e inicia o serviço de novo; o dispositivo pede um IP novo na próxima renovação."
+            (tm("Lidos de {} e atualizados sozinhos. Para liberar um lease, o painel para o serviço por alguns segundos, tira o dispositivo do arquivo e inicia o serviço de novo; o dispositivo pede um IP novo na próxima renovação.", &[html! { code { (state_file) } }]))
         }
     }
 }
 
 pub fn frag_lease_count(snap: &Snapshot) -> Markup {
     let n = snap.leases.iter().filter(|l| l.is_active(now_ts())).count();
-    html! { (n) " dispositivo(s) com IP" }
+    html! { (tf!("{} dispositivo(s) com IP", n)) }
 }
 
 pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
@@ -800,13 +833,13 @@ pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
     let mut active: Vec<&Lease> = snap.leases.iter().filter(|l| l.is_active(now)).collect();
     active.sort_by_key(|l| (!snap.is_fresh(&l.mac), u32::from(l.ip)));
     html! {
-        @if let Some(e) = &snap.lease_error { (error_box(Some(e))) }
+        @if let Some(e) = &snap.lease_error { (error_box(Some(&e.render()))) }
         @if active.is_empty() {
-            p.empty { "Nenhum dispositivo com IP no momento." }
+            p.empty { (t("Nenhum dispositivo com IP no momento.")) }
         } @else {
             div.table-wrap {
                 table #lease-table {
-                    thead { tr { th { "IP" } th { "MAC" } th { "Nome do host" } th { "Expira" } th { "Tipo" } th.actions { "" } } }
+                    thead { tr { th { "IP" } th { "MAC" } th { (t("Nome do host")) } th { (t("Expira")) } th { (t("Tipo")) } th.actions { "" } } }
                     tbody {
                         @for l in &active {
                             @let (when, rel) = fmt_expiry(l.expiry, now);
@@ -815,24 +848,24 @@ pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
                                 td.mono {
                                     (l.ip)
                                     @match snap.fresh_kind(&l.mac) {
-                                        Some(true) => { " " span.tag.primary.small { "novo" } }
-                                        Some(false) => { " " span.tag.info.small { "renovado" } }
+                                        Some(true) => { " " span.tag.primary.small { (t("novo")) } }
+                                        Some(false) => { " " span.tag.info.small { (t("renovado")) } }
                                         None => {}
                                     }
                                 }
                                 td.mono { (l.mac) }
                                 td { @if l.hostname.is_empty() { span.muted { "—" } } @else { (l.hostname) } }
                                 td.nowrap { (when) " " span.muted.small { (rel) } }
-                                td { @if is_res { span.tag.info { "Reserva" } } @else { span.tag { "Dinâmico" } } }
+                                td { @if is_res { span.tag.info { (t("Reserva")) } } @else { span.tag { (t("Dinâmico")) } } }
                                 td.actions {
                                     @if !is_res {
-                                        a.btn.small.light href={"/reservations/new?mac=" (l.mac) "&ip=" (l.ip) "&hostname=" (url_enc(&l.hostname))} { (icon("pin")) "Fixar IP" }
+                                        a.btn.small.light href={"/reservations/new?mac=" (l.mac) "&ip=" (l.ip) "&hostname=" (url_enc(&l.hostname))} { (icon("pin")) (t("Fixar IP")) }
                                     }
                                     form.inline method="post" action="/leases/release"
-                                        data-confirm={"Liberar o IP " (l.ip) " de " (l.mac) "? O serviço DHCP será parado e iniciado de novo por alguns segundos."} {
+                                        data-confirm=(tf!("Liberar o IP {} de {}? O serviço DHCP será parado e iniciado de novo por alguns segundos.", l.ip, l.mac)) {
                                         (csrf_input(csrf))
                                         input type="hidden" name="mac" value=(l.mac);
-                                        button.btn.small.soft-danger type="submit" { "Liberar" }
+                                        button.btn.small.soft-danger type="submit" { (t("Liberar")) }
                                     }
                                 }
                             }
@@ -849,28 +882,30 @@ pub fn frag_lease_table(snap: &Snapshot, csrf: &str) -> Markup {
 pub fn login_page(err: Option<&str>) -> Markup {
     html! {
         (DOCTYPE)
-        html lang="pt-BR" {
+        html lang=(i18n::lang().html()) {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { "Entrar · Open DHCP" }
+                title { (t("Entrar")) " · Open DHCP" }
                 script src="/static/theme.js" {}
                 link rel="stylesheet" href="/static/style.css";
+                script src="/static/app.js" defer {}
             }
             body.login-body {
+                div.login-lang { (lang_menu("/login")) }
                 div.login-wrap {
                     div.login-art {
                         span.logo.big { (icon("wifi")) }
                         h2 { "Open DHCP" }
-                        p { "Acompanhe os dispositivos da rede em tempo real e gerencie faixas, reservas e o serviço DHCP num só lugar." }
+                        p { (t("Acompanhe os dispositivos da rede em tempo real e gerencie faixas, reservas e o serviço DHCP num só lugar.")) }
                     }
                     form.card.login method="post" action="/login" {
-                        h1 { "Entrar" }
-                        p.muted { "Use o usuário configurado no panel.toml." }
+                        h1 { (t("Entrar")) }
+                        p.muted { (t("Use o usuário configurado no panel.toml.")) }
                         (error_box(err))
-                        label { "Usuário" input name="username" autocomplete="username" required autofocus; }
-                        label { "Senha" input name="password" type="password" autocomplete="current-password" required; }
-                        button.btn.primary.full type="submit" { "Entrar" }
+                        label { (t("Usuário")) input name="username" autocomplete="username" required autofocus; }
+                        label { (t("Senha")) input name="password" type="password" autocomplete="current-password" required; }
+                        button.btn.primary.full type="submit" { (t("Entrar")) }
                     }
                 }
             }
@@ -903,10 +938,10 @@ mod tests {
             s.leases.push(Lease { index: i as u16, mac: format!("aa:00:00:00:00:{i:02x}"), ip: Ipv4Addr::new(10, 0, 0, i), expiry: leases::INFINITE, hostname: String::new(), local: true });
         }
         let a = alerts(&s, now_ts(), now_l);
-        assert!(a.iter().any(|a| a.text.contains("90% ocupada")), "{:?}", a.iter().map(|a| &a.text).collect::<Vec<_>>());
-        assert!(a.iter().any(|a| a.text.contains("sem faixa")));
+        assert!(a.iter().any(|a| a.msg.render().contains("90% ocupada")), "{:?}", a.iter().map(|a| a.msg.render()).collect::<Vec<_>>());
+        assert!(a.iter().any(|a| a.msg.render().contains("sem faixa")));
         s.status = Status::Stopped;
-        assert!(alerts(&s, now_ts(), now_l)[0].text.contains("parado"));
+        assert!(alerts(&s, now_ts(), now_l)[0].msg.render().contains("parado"));
     }
 
     #[test]

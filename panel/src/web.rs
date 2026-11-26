@@ -24,12 +24,15 @@ use crate::config::Config;
 use crate::dhcp::{self, OptionsInput, RangeSetInput, ReservationInput};
 use crate::ini::IniDoc;
 use crate::leases;
+use crate::i18n::{self, n_, t, tm, Lang, LANG};
 use crate::monitor::{Monitor, Snapshot};
+use crate::tf;
 use crate::notes::{Alert, NoteAction};
 use crate::service::{self, Action, Status};
 use crate::views::{self, csrf_input, error_box, icon, Shell};
 
 const COOKIE: &str = "odp_session";
+const LANG_COOKIE: &str = "odp_lang";
 const CSS: &str = include_str!("../assets/style.css");
 const JS: &str = include_str!("../assets/app.js");
 const THEME_JS: &str = include_str!("../assets/theme.js");
@@ -50,15 +53,15 @@ pub struct App {
 fn restart_alert(app: &App) -> Alert {
     Alert {
         rev: app.restart_rev.load(Ordering::SeqCst).to_string(), // cada alteração nova avisa de novo
-        action: Some(NoteAction::Service("restart", "Reiniciar agora", "Reiniciar o servidor DHCP agora?")),
-        ..Alert::new("restart", "info", "A configuração mudou. Reinicie o serviço para o DHCP passar a usar as alterações.")
+        action: Some(NoteAction::Service("restart", n_("Reiniciar agora"), n_("Reiniciar o servidor DHCP agora?"))),
+        ..Alert::new("restart", "info", crate::msg!("A configuração mudou. Reinicie o serviço para o DHCP passar a usar as alterações."))
     }
 }
 
 fn password_alert() -> Alert {
     Alert {
-        action: Some(NoteAction::Link("/account", "Trocar senha")),
-        ..Alert::new("default-password", "warn", "Você está usando a senha padrão. Troque-a para proteger o painel.")
+        action: Some(NoteAction::Link("/account", n_("Trocar senha"))),
+        ..Alert::new("default-password", "warn", crate::msg!("Você está usando a senha padrão. Troque-a para proteger o painel."))
     }
 }
 
@@ -104,9 +107,11 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         .route("/service/{action}", post(service_action))
         .route("/account", get(account_page).post(account_update))
         .route("/notes/dismiss", post(dismiss_note))
+        .route("/lang/{code}", get(set_lang))
         .route("/static/style.css", get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], CSS) }))
         .route("/static/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], JS) }))
         .route("/static/theme.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], THEME_JS) }))
+        .layer(middleware::from_fn(with_lang))
         .layer(middleware::from_fn(security_headers))
         .with_state(app)
 }
@@ -123,6 +128,37 @@ async fn security_headers(req: Request, next: Next) -> Response {
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
+}
+
+// ---------- idioma ----------
+
+/// Idioma da requisição: cookie `odp_lang`, senão o `Accept-Language` do navegador, senão português.
+fn request_lang(headers: &axum::http::HeaderMap) -> Lang {
+    let jar = CookieJar::from_headers(headers);
+    jar.get(LANG_COOKIE)
+        .and_then(|c| Lang::from_code(c.value()))
+        .or_else(|| headers.get(header::ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()).and_then(Lang::from_accept))
+        .unwrap_or_default()
+}
+
+/// Todo o tratamento da requisição (inclusive as mensagens de erro) usa o idioma dela.
+async fn with_lang(req: Request, next: Next) -> Response {
+    let lang = request_lang(req.headers());
+    LANG.scope(lang, next.run(req)).await
+}
+
+#[derive(serde::Deserialize)]
+struct NextQuery {
+    next: Option<String>,
+}
+
+/// Troca o idioma (cookie por 1 ano) e volta para a página em que a pessoa estava.
+async fn set_lang(UrlPath(code): UrlPath<String>, Query(q): Query<NextQuery>) -> Response {
+    let Some(lang) = Lang::from_code(&code) else { return StatusCode::NOT_FOUND.into_response() };
+    // só caminhos locais (sem "//host" nem esquema), para não virar redirecionamento aberto
+    let next = q.next.filter(|n| n.starts_with('/') && !n.starts_with("//") && !n.contains('\\')).unwrap_or_else(|| "/".into());
+    let cookie = format!("{LANG_COOKIE}={}; Path=/; Max-Age=31536000; SameSite=Lax", lang.code());
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&next)).into_response()
 }
 
 // ---------- sessão ----------
@@ -152,7 +188,7 @@ impl Ctx {
         if auth::ct_eq(sent, &self.s.csrf) {
             Ok(())
         } else {
-            Err((StatusCode::FORBIDDEN, "Formulário expirado; recarregue a página.").into_response())
+            Err((StatusCode::FORBIDDEN, t("Formulário expirado; recarregue a página.").to_string()).into_response())
         }
     }
 }
@@ -169,11 +205,17 @@ fn flash(app: &App, ctx: &Ctx, ok: bool, text: impl Into<String>, to: &str) -> R
 /// Página completa com o layout comum.
 fn page(app: &App, ctx: &Ctx, title: &str, nav: &str, live: &str, body: Markup) -> Markup {
     let snap = app.monitor.snapshot();
+    let here = match nav {
+        "dashboard" => "/".to_string(),
+        "activity" | "leases" | "reservations" | "ranges" | "options" | "account" => format!("/{nav}"),
+        _ => "/".to_string(),
+    };
     views::shell(
         Shell {
             title,
             nav,
             live,
+            here: &here,
             user: &ctx.s.user,
             csrf: &ctx.s.csrf,
             flash: ctx.s.flash.as_ref().map(|f| (f.ok, f.text.as_str())),
@@ -196,7 +238,7 @@ fn rev_of(bytes: &[u8]) -> String {
 }
 
 fn load_ini(path: &Path) -> Result<Loaded, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("não consegui ler {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| tf!("Não consegui ler {}: {}", path.display(), e))?;
     let rev = rev_of(&bytes);
     // O .ini original pode ter acentos em Latin-1; nesse caso gravamos de volta em Latin-1.
     let (text, latin1) = match String::from_utf8(bytes) {
@@ -218,7 +260,7 @@ async fn mutate_ini<T>(
         let path = &app.cfg.ini_file;
         let loaded = load_ini(path)?;
         if loaded.rev != rev {
-            return Err("O arquivo de configuração foi alterado por outra pessoa ou processo. Recarregue a página e refaça a alteração.".into());
+            return Err(tf!("O arquivo de configuração foi alterado por outra pessoa ou processo. Recarregue a página e refaça a alteração."));
         }
         let mut doc = loaded.doc.clone();
         let out = change(&mut doc)?;
@@ -229,8 +271,8 @@ async fn mutate_ini<T>(
             text.into_bytes()
         };
         crate::fsutil::backup(path, &app.cfg.backup_dir, app.cfg.backups_keep)
-            .map_err(|e| format!("não consegui fazer o backup em {}: {e}", app.cfg.backup_dir.display()))?;
-        crate::fsutil::write_atomic(path, &bytes).map_err(|e| format!("não consegui gravar {}: {e}", path.display()))?;
+            .map_err(|e| tf!("Não consegui fazer o backup em {}: {}", app.cfg.backup_dir.display(), e))?;
+        crate::fsutil::write_atomic(path, &bytes).map_err(|e| tf!("Não consegui gravar {}: {}", path.display(), e))?;
         app.restart_rev.fetch_add(1, Ordering::SeqCst);
         tracing::info!(file = %path.display(), "configuração alterada pelo painel");
         out
@@ -286,6 +328,7 @@ async fn live(
     Query(q): Query<LiveQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let page = q.page.unwrap_or_default();
+    let lang = i18n::lang(); // o fluxo continua depois que o middleware termina
     let token = ctx.token.clone();
     let csrf = ctx.s.csrf.clone();
     let stream = WatchStream::new(app.monitor.subscribe()).map(move |_| {
@@ -293,7 +336,7 @@ async fn live(
             return Ok(SseEvent::default().event("logout").data("1"));
         }
         let snap = app.monitor.snapshot();
-        let patch = live_patch(&snap, &page, &csrf);
+        let patch = LANG.sync_scope(lang, || live_patch(&snap, &page, &csrf));
         Ok(SseEvent::default().event("patch").data(serde_json::Value::Object(patch).to_string()))
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
@@ -317,7 +360,7 @@ async fn login(
 ) -> Response {
     let ip = peer.ip();
     if app.sessions.locked_out(ip) {
-        return (StatusCode::TOO_MANY_REQUESTS, views::login_page(Some("Muitas tentativas. Aguarde 5 minutos."))).into_response();
+        return (StatusCode::TOO_MANY_REQUESTS, views::login_page(Some(t("Muitas tentativas. Aguarde 5 minutos.")))).into_response();
     }
     let user = field(&f, "username").to_string();
     let pass = field(&f, "password").to_string();
@@ -328,7 +371,7 @@ async fn login(
         app.sessions.record_fail(ip);
         tracing::warn!(%ip, "login recusado");
         tokio::time::sleep(Duration::from_millis(600)).await;
-        return (StatusCode::UNAUTHORIZED, views::login_page(Some("Usuário ou senha inválidos."))).into_response();
+        return (StatusCode::UNAUTHORIZED, views::login_page(Some(t("Usuário ou senha inválidos.")))).into_response();
     }
     app.sessions.clear_fails(ip);
     let ttl = Duration::from_secs(app.cfg.session_hours * 3600);
@@ -356,19 +399,19 @@ async fn logout(State(app): State<Shared>, ctx: Ctx, jar: CookieJar, Form(f): Fo
 async fn dashboard(State(app): State<Shared>, ctx: Ctx) -> Response {
     let snap = app.monitor.snapshot();
     let body = views::dashboard_body(&snap, &ctx.s.csrf);
-    page(&app, &ctx, "Visão geral", "dashboard", "dashboard", body).into_response()
+    page(&app, &ctx, n_("Visão geral"), "dashboard", "dashboard", body).into_response()
 }
 
 async fn activity_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     let snap = app.monitor.snapshot();
     let body = views::activity_body(&snap);
-    page(&app, &ctx, "Atividade", "activity", "activity", body).into_response()
+    page(&app, &ctx, n_("Atividade"), "activity", "activity", body).into_response()
 }
 
 async fn leases_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     let snap = app.monitor.snapshot();
     let body = views::leases_body(&snap, &ctx.s.csrf, &app.cfg.state_file.display().to_string());
-    page(&app, &ctx, "Leases ativos", "leases", "leases", body).into_response()
+    page(&app, &ctx, n_("Leases ativos"), "leases", "leases", body).into_response()
 }
 
 async fn service_action(
@@ -393,13 +436,13 @@ async fn service_action(
                 app.monitor.set_extra("restart", None).await;
             }
             let msg = match act {
-                Action::Start => "Serviço iniciado.",
-                Action::Stop => "Serviço parado.",
-                Action::Restart => "Serviço reiniciado com a configuração atual.",
+                Action::Start => t("Serviço iniciado."),
+                Action::Stop => t("Serviço parado."),
+                Action::Restart => t("Serviço reiniciado com a configuração atual."),
             };
             flash(&app, &ctx, true, msg, "/")
         }
-        Err(e) => flash(&app, &ctx, false, format!("Falha ao executar a ação: {e}"), "/"),
+        Err(e) => flash(&app, &ctx, false, tf!("Falha ao executar a ação: {}", e), "/"),
     }
 }
 
@@ -408,18 +451,18 @@ async fn release_lease(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Fields
         return r;
     }
     let Some(mac) = crate::ini::normalize_mac(field(&f, "mac")) else {
-        return flash(&app, &ctx, false, "MAC inválido.", "/leases");
+        return flash(&app, &ctx, false, t("MAC inválido."), "/leases");
     };
     let (result, restart) = {
         let _guard = app.write_lock.lock().await;
         let status = service::status(&app.cfg.service).await;
         if status == Status::Unknown {
-            return flash(&app, &ctx, false, "Não consegui saber se o serviço está rodando; nada foi alterado.", "/leases");
+            return flash(&app, &ctx, false, t("Não consegui saber se o serviço está rodando; nada foi alterado."), "/leases");
         }
         let was_running = status == Status::Running;
         if was_running {
             if let Err(e) = service::act(&app.cfg.service, Action::Stop).await {
-                return flash(&app, &ctx, false, format!("Não consegui parar o serviço: {e}"), "/leases");
+                return flash(&app, &ctx, false, tf!("Não consegui parar o serviço: {}", e), "/leases");
             }
         }
         let result = leases::remove_mac(&app.cfg.state_file, &mac);
@@ -429,10 +472,10 @@ async fn release_lease(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Fields
     app.monitor.poke().await;
     tracing::info!(user = %ctx.s.user, %mac, "lease liberado");
     match (result, restart) {
-        (Ok(0), Ok(())) => flash(&app, &ctx, false, format!("Nenhum lease encontrado para {mac}."), "/leases"),
-        (Ok(_), Ok(())) => flash(&app, &ctx, true, format!("Lease de {mac} liberado."), "/leases"),
-        (Err(e), Ok(())) => flash(&app, &ctx, false, format!("Não consegui alterar o arquivo de leases: {e}"), "/leases"),
-        (_, Err(e)) => flash(&app, &ctx, false, format!("ATENÇÃO: o serviço foi parado e não voltou: {e}"), "/"),
+        (Ok(0), Ok(())) => flash(&app, &ctx, false, tf!("Nenhum lease encontrado para {}.", mac), "/leases"),
+        (Ok(_), Ok(())) => flash(&app, &ctx, true, tf!("Lease de {} liberado.", mac), "/leases"),
+        (Err(e), Ok(())) => flash(&app, &ctx, false, tf!("Não consegui alterar o arquivo de leases: {}", e), "/leases"),
+        (_, Err(e)) => flash(&app, &ctx, false, tf!("ATENÇÃO: o serviço foi parado e não voltou: {}", e), "/"),
     }
 }
 
@@ -446,13 +489,13 @@ fn form_card(action: &str, rev: &str, csrf: &str, cancel: &str, fields: Markup, 
             div.fields { (fields) }
             @if !extra.is_empty() {
                 div.extra {
-                    p.muted.small { (extra_title) }
+                    p.muted.small { (t(extra_title)) }
                     ul { @for (k, v) in extra { li.mono { (k) "=" (v) } } }
                 }
             }
             div.form-actions {
-                a.btn.light href=(cancel) { "Cancelar" }
-                button.btn.primary type="submit" { (icon("check")) "Salvar" }
+                a.btn.light href=(cancel) { (t("Cancelar")) }
+                button.btn.primary type="submit" { (icon("check")) (t("Salvar")) }
             }
         }
     }
@@ -481,28 +524,28 @@ async fn reservations_page(State(app): State<Shared>, ctx: Ctx) -> Response {
         (error_box(err.as_deref()))
         section.card {
             div.card-head {
-                h2.card-title { (list.len()) " reserva(s)" }
+                h2.card-title { (tf!("{} reserva(s)", list.len())) }
                 div.row {
-                    label.search { (icon("search")) input type="search" placeholder="Filtrar" data-filter="#res-table" aria-label="Filtrar"; }
-                    a.btn.primary href="/reservations/new" { (icon("plus")) "Nova reserva" }
+                    label.search { (icon("search")) input type="search" placeholder=(t("Filtrar")) data-filter="#res-table" aria-label=(t("Filtrar")); }
+                    a.btn.primary href="/reservations/new" { (icon("plus")) (t("Nova reserva")) }
                 }
             }
             @if list.is_empty() {
-                p.empty { "Nenhuma reserva. Crie uma para que um dispositivo receba sempre o mesmo IP." }
+                p.empty { (t("Nenhuma reserva. Crie uma para que um dispositivo receba sempre o mesmo IP.")) }
             } @else {
                 div.table-wrap {
                     table #res-table {
-                        thead { tr { th { "MAC" } th { "IP" } th { "Nome do host" } th { "Agora" } th { "Outras opções" } th.actions { "" } } }
+                        thead { tr { th { "MAC" } th { "IP" } th { (t("Nome do host")) } th { (t("Agora")) } th { (t("Outras opções")) } th.actions { "" } } }
                         tbody {
                             @for r in &list {
                                 @let online = snap.leases.iter().any(|l| l.mac == r.mac && l.is_active(now));
                                 tr {
                                     td.mono { (r.mac) }
-                                    td.mono { @match &r.ip { Some(ip) => (ip), None => span.tag.bad { (icon("lock")) "Bloqueado" } } }
+                                    td.mono { @match &r.ip { Some(ip) => (ip), None => span.tag.bad { (icon("lock")) (t("Bloqueado")) } } }
                                     td { @match &r.hostname { Some(h) => (h), None => span.muted { "—" } } }
-                                    td { @if online { span.badge.ok { span.dot {} "Com IP" } } @else { span.muted.small { "sem lease" } } }
-                                    td { @if r.extra.is_empty() { span.muted { "—" } } @else { span.tag { (r.extra.len()) " opção(ões)" } } }
-                                    td.actions { a.btn.small.light href={"/reservations/" (r.n) "/edit"} { (icon("edit")) "Editar" } }
+                                    td { @if online { span.badge.ok { span.dot {} (t("Com IP")) } } @else { span.muted.small { (t("sem lease")) } } }
+                                    td { @if r.extra.is_empty() { span.muted { "—" } } @else { span.tag { (tf!("{} opção(ões)", r.extra.len())) } } }
+                                    td.actions { a.btn.small.light href={"/reservations/" (r.n) "/edit"} { (icon("edit")) (t("Editar")) } }
                                 }
                             }
                         }
@@ -511,7 +554,7 @@ async fn reservations_page(State(app): State<Shared>, ctx: Ctx) -> Response {
             }
         }
     };
-    page(&app, &ctx, "Reservas", "reservations", "other", body).into_response()
+    page(&app, &ctx, n_("Reservas"), "reservations", "other", body).into_response()
 }
 
 struct ResForm<'a> {
@@ -527,16 +570,16 @@ struct ResForm<'a> {
 fn reservation_form(csrf: &str, rf: ResForm) -> Markup {
     let action = match rf.n { Some(n) => format!("/reservations/{n}/edit"), None => "/reservations/new".into() };
     let fields = html! {
-        label { "Endereço MAC" input.mono name="mac" value=(rf.mac) placeholder="00:11:22:33:44:55" required; }
-        label { "IP fixo" input.mono name="ip" value=(rf.ip) placeholder="192.168.0.50";
-            small { "Deixe vazio para bloquear o dispositivo (ele nunca recebe IP)." } }
-        label { "Nome do host (opcional)" input name="hostname" value=(rf.hostname) placeholder="impressora-sala"; }
+        label { (t("Endereço MAC")) input.mono name="mac" value=(rf.mac) placeholder="00:11:22:33:44:55" required; }
+        label { (t("IP fixo")) input.mono name="ip" value=(rf.ip) placeholder="192.168.0.50";
+            small { (t("Deixe vazio para bloquear o dispositivo (ele nunca recebe IP).")) } }
+        label { (t("Nome do host (opcional)")) input name="hostname" value=(rf.hostname) placeholder=(t("impressora-sala")); }
     };
     html! {
         (error_box(rf.err))
-        (form_card(&action, rf.rev, csrf, "/reservations", fields, rf.extra, "Outras opções desta reserva no .ini (mantidas como estão):"))
+        (form_card(&action, rf.rev, csrf, "/reservations", fields, rf.extra, n_("Outras opções desta reserva no .ini (mantidas como estão):")))
         @if let Some(n) = rf.n {
-            (delete_form(&format!("/reservations/{n}/delete"), rf.rev, csrf, &format!("Excluir a reserva de {}?", rf.mac), "Excluir reserva"))
+            (delete_form(&format!("/reservations/{n}/delete"), rf.rev, csrf, &tf!("Excluir a reserva de {}?", rf.mac), t("Excluir reserva")))
         }
     }
 }
@@ -550,7 +593,7 @@ async fn reservation_new(State(app): State<Shared>, ctx: Ctx, Query(q): Query<Fi
         &ctx.s.csrf,
         ResForm { n: None, rev: &loaded.rev, mac: field(&q, "mac"), ip: field(&q, "ip"), hostname: field(&q, "hostname"), extra: &[], err: None },
     );
-    page(&app, &ctx, "Nova reserva", "reservations", "other", form).into_response()
+    page(&app, &ctx, n_("Nova reserva"), "reservations", "other", form).into_response()
 }
 
 async fn reservation_create(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Fields>) -> Response {
@@ -559,13 +602,13 @@ async fn reservation_create(State(app): State<Shared>, ctx: Ctx, Form(f): Form<F
     }
     let input = ReservationInput { mac: field(&f, "mac"), ip: field(&f, "ip"), hostname: field(&f, "hostname") };
     match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::add_reservation(doc, &input)).await {
-        Ok(mac) => flash(&app, &ctx, true, format!("Reserva de {mac} criada."), "/reservations"),
+        Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} criada.", mac), "/reservations"),
         Err(e) => {
             let form = reservation_form(
                 &ctx.s.csrf,
                 ResForm { n: None, rev: field(&f, "rev"), mac: input.mac, ip: input.ip, hostname: input.hostname, extra: &[], err: Some(&e) },
             );
-            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, "Nova reserva", "reservations", "other", form)).into_response()
+            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Nova reserva"), "reservations", "other", form)).into_response()
         }
     }
 }
@@ -576,7 +619,7 @@ async fn reservation_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPa
         Err(e) => return flash(&app, &ctx, false, e, "/reservations"),
     };
     let Some(r) = dhcp::reservations(&loaded.doc).into_iter().find(|r| r.n == n) else {
-        return flash(&app, &ctx, false, "Reserva não encontrada.", "/reservations");
+        return flash(&app, &ctx, false, t("Reserva não encontrada."), "/reservations");
     };
     let form = reservation_form(
         &ctx.s.csrf,
@@ -590,7 +633,7 @@ async fn reservation_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPa
             err: None,
         },
     );
-    page(&app, &ctx, "Editar reserva", "reservations", "other", form).into_response()
+    page(&app, &ctx, n_("Editar reserva"), "reservations", "other", form).into_response()
 }
 
 async fn reservation_update(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<usize>, Form(f): Form<Fields>) -> Response {
@@ -599,13 +642,13 @@ async fn reservation_update(State(app): State<Shared>, ctx: Ctx, UrlPath(n): Url
     }
     let input = ReservationInput { mac: field(&f, "mac"), ip: field(&f, "ip"), hostname: field(&f, "hostname") };
     match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_reservation(doc, n, &input)).await {
-        Ok(mac) => flash(&app, &ctx, true, format!("Reserva de {mac} atualizada."), "/reservations"),
+        Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} atualizada.", mac), "/reservations"),
         Err(e) => {
             let form = reservation_form(
                 &ctx.s.csrf,
                 ResForm { n: Some(n), rev: field(&f, "rev"), mac: input.mac, ip: input.ip, hostname: input.hostname, extra: &[], err: Some(&e) },
             );
-            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, "Editar reserva", "reservations", "other", form)).into_response()
+            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Editar reserva"), "reservations", "other", form)).into_response()
         }
     }
 }
@@ -615,7 +658,7 @@ async fn reservation_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): Url
         return r;
     }
     match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::delete_reservation(doc, n)).await {
-        Ok(mac) => flash(&app, &ctx, true, format!("Reserva de {mac} excluída."), "/reservations"),
+        Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} excluída.", mac), "/reservations"),
         Err(e) => flash(&app, &ctx, false, e, "/reservations"),
     }
 }
@@ -631,43 +674,43 @@ async fn ranges_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     let usage = views::range_usage(&doc, &snap.leases, views::now_ts());
     let body = html! {
         (error_box(err.as_deref()))
-        div.page-actions { a.btn.primary href="/ranges/new" { (icon("plus")) "Novo conjunto de faixas" } }
+        div.page-actions { a.btn.primary href="/ranges/new" { (icon("plus")) (t("Novo conjunto de faixas")) } }
         @if sets.is_empty() {
-            section.card { p.empty { "Nenhum [RANGE_SET] no arquivo. Sem faixas, o servidor só atende reservas." } }
+            section.card { p.empty { (t("Nenhum [RANGE_SET] no arquivo. Sem faixas, o servidor só atende reservas.")) } }
         }
         div.grid.g-2 {
             @for rs in &sets {
                 section.card {
                     div.card-head {
-                        h2.card-title { "Conjunto #" (rs.n + 1) }
-                        a.btn.small.light href={"/ranges/" (rs.n) "/edit"} { (icon("edit")) "Editar" }
+                        h2.card-title { (tf!("Conjunto #{}", rs.n + 1)) }
+                        a.btn.small.light href={"/ranges/" (rs.n) "/edit"} { (icon("edit")) (t("Editar")) }
                     }
                     @if rs.ranges.is_empty() {
-                        p.empty { "Sem faixas ativas (só comentários ou opções)." }
+                        p.empty { (t("Sem faixas ativas (só comentários ou opções).")) }
                     } @else {
                         ul.range-list {
                             @for u in usage.iter().filter(|u| u.set == rs.n) {
                                 li {
-                                    div.range-top { span.mono { (u.start) " – " (u.end) } span.muted.small { (u.used) " de " (u.total) " em uso" } }
+                                    div.range-top { span.mono { (u.start) " – " (u.end) } span.muted.small { (tf!("{} de {} em uso", u.used, u.total)) } }
                                     (views::usage_bar(u.used, u.total))
                                 }
                             }
                         }
                     }
                     dl.opts {
-                        div { dt { "Máscara" } dd.mono { (rs.opts.mask.as_deref().unwrap_or("—")) } }
+                        div { dt { (t("Máscara")) } dd.mono { (rs.opts.mask.as_deref().unwrap_or("—")) } }
                         div { dt { "Gateway" } dd.mono { (rs.opts.router.as_deref().unwrap_or("—")) } }
                         div { dt { "DNS" } dd.mono { (rs.opts.dns.as_deref().unwrap_or("—")) } }
-                        div { dt { "Lease" } dd.mono { (rs.opts.lease.as_deref().map(|s| s.parse::<u32>().map(crate::events::fmt_secs).unwrap_or(s.to_string())).unwrap_or("padrão".into())) } }
+                        div { dt { "Lease" } dd.mono { (rs.opts.lease.as_deref().map(|s| s.parse::<u32>().map(crate::events::fmt_secs).unwrap_or(s.to_string())).unwrap_or(t("padrão").into())) } }
                     }
                     @if !rs.extra.is_empty() {
-                        p.muted.small { (rs.extra.len()) " outra(s) opção(ões)/filtro(s) neste conjunto, mantidos como estão." }
+                        p.muted.small { (tf!("{} outra(s) opção(ões)/filtro(s) neste conjunto, mantidos como estão.", rs.extra.len())) }
                     }
                 }
             }
         }
     };
-    page(&app, &ctx, "Faixas dinâmicas", "ranges", "other", body).into_response()
+    page(&app, &ctx, n_("Faixas dinâmicas"), "ranges", "other", body).into_response()
 }
 
 struct RangeForm<'a> {
@@ -685,19 +728,19 @@ struct RangeForm<'a> {
 fn range_form(csrf: &str, rf: RangeForm) -> Markup {
     let action = match rf.n { Some(n) => format!("/ranges/{n}/edit"), None => "/ranges/new".into() };
     let fields = html! {
-        label.span2 { "Faixas (uma por linha)"
+        label.span2 { (t("Faixas (uma por linha)"))
             textarea.mono name="ranges" rows="4" placeholder="192.168.0.100-192.168.0.200" required { (rf.ranges) } }
-        label { "Máscara de rede" input.mono name="mask" value=(rf.mask) placeholder="255.255.255.0"; }
-        label { "Gateway (roteador)" input.mono name="router" value=(rf.router) placeholder="192.168.0.1"; }
-        label { "Servidores DNS" input.mono name="dns" value=(rf.dns) placeholder="192.168.0.1, 8.8.8.8"; }
-        label { "Tempo de lease (segundos)" input.mono name="lease" value=(rf.lease) placeholder="36000" inputmode="numeric";
-            small { "Vazio usa o padrão das opções globais; 0 = sem expiração." } }
+        label { (t("Máscara de rede")) input.mono name="mask" value=(rf.mask) placeholder="255.255.255.0"; }
+        label { (t("Gateway (roteador)")) input.mono name="router" value=(rf.router) placeholder="192.168.0.1"; }
+        label { (t("Servidores DNS")) input.mono name="dns" value=(rf.dns) placeholder="192.168.0.1, 8.8.8.8"; }
+        label { (t("Tempo de lease (segundos)")) input.mono name="lease" value=(rf.lease) placeholder="36000" inputmode="numeric";
+            small { (t("Vazio usa o padrão das opções globais; 0 = sem expiração.")) } }
     };
     html! {
         (error_box(rf.err))
-        (form_card(&action, rf.rev, csrf, "/ranges", fields, rf.extra, "Outras opções e filtros deste conjunto (mantidos como estão):"))
+        (form_card(&action, rf.rev, csrf, "/ranges", fields, rf.extra, n_("Outras opções e filtros deste conjunto (mantidos como estão):")))
         @if let Some(n) = rf.n {
-            (delete_form(&format!("/ranges/{n}/delete"), rf.rev, csrf, "Excluir este conjunto de faixas inteiro, com opções, filtros e comentários?", "Excluir conjunto"))
+            (delete_form(&format!("/ranges/{n}/delete"), rf.rev, csrf, t("Excluir este conjunto de faixas inteiro, com opções, filtros e comentários?"), t("Excluir conjunto")))
         }
     }
 }
@@ -718,7 +761,7 @@ async fn range_new(State(app): State<Shared>, ctx: Ctx) -> Response {
         &ctx.s.csrf,
         RangeForm { n: None, rev: &loaded.rev, ranges: "", mask: "", router: "", dns: "", lease: "", extra: &[], err: None },
     );
-    page(&app, &ctx, "Novo conjunto de faixas", "ranges", "other", form).into_response()
+    page(&app, &ctx, n_("Novo conjunto de faixas"), "ranges", "other", form).into_response()
 }
 
 async fn range_save(app: Shared, ctx: Ctx, n: Option<usize>, f: Fields) -> Response {
@@ -732,7 +775,7 @@ async fn range_save(app: Shared, ctx: Ctx, n: Option<usize>, f: Fields) -> Respo
     })
     .await;
     match result {
-        Ok(()) => flash(&app, &ctx, true, "Faixas salvas.", "/ranges"),
+        Ok(()) => flash(&app, &ctx, true, t("Faixas salvas."), "/ranges"),
         Err(e) => {
             let form = range_form(
                 &ctx.s.csrf,
@@ -748,7 +791,7 @@ async fn range_save(app: Shared, ctx: Ctx, n: Option<usize>, f: Fields) -> Respo
                     err: Some(&e),
                 },
             );
-            let title = if n.is_some() { "Editar faixas" } else { "Novo conjunto de faixas" };
+            let title = if n.is_some() { n_("Editar faixas") } else { n_("Novo conjunto de faixas") };
             (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, title, "ranges", "other", form)).into_response()
         }
     }
@@ -768,7 +811,7 @@ async fn range_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<usi
         Err(e) => return flash(&app, &ctx, false, e, "/ranges"),
     };
     let Some(rs) = dhcp::range_sets(&loaded.doc).into_iter().find(|r| r.n == n) else {
-        return flash(&app, &ctx, false, "Conjunto de faixas não encontrado.", "/ranges");
+        return flash(&app, &ctx, false, t("Conjunto de faixas não encontrado."), "/ranges");
     };
     let ranges = rs.ranges.join("\n");
     let form = range_form(
@@ -785,7 +828,7 @@ async fn range_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<usi
             err: None,
         },
     );
-    page(&app, &ctx, "Editar faixas", "ranges", "other", form).into_response()
+    page(&app, &ctx, n_("Editar faixas"), "ranges", "other", form).into_response()
 }
 
 async fn range_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<usize>, Form(f): Form<Fields>) -> Response {
@@ -793,7 +836,7 @@ async fn range_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<u
         return r;
     }
     match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::delete_range_set(doc, n)).await {
-        Ok(()) => flash(&app, &ctx, true, "Conjunto de faixas excluído.", "/ranges"),
+        Ok(()) => flash(&app, &ctx, true, t("Conjunto de faixas excluído."), "/ranges"),
         Err(e) => flash(&app, &ctx, false, e, "/ranges"),
     }
 }
@@ -803,17 +846,17 @@ async fn range_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<u
 fn options_form(csrf: &str, rev: &str, v: [&str; 5], extra: &[(String, String)], err: Option<&str>) -> Markup {
     let [domain, mask, router, dns, lease] = v;
     let fields = html! {
-        p.muted.span2 { "Valem para todos os dispositivos, a menos que a faixa ou a reserva defina outro valor." }
-        label { "Domínio" input name="domain" value=(domain) placeholder="empresa.local"; }
-        label { "Máscara de rede" input.mono name="mask" value=(mask) placeholder="255.255.255.0"; }
-        label { "Gateway (roteador)" input.mono name="router" value=(router) placeholder="192.168.0.1"; }
-        label { "Servidores DNS" input.mono name="dns" value=(dns) placeholder="192.168.0.1, 8.8.8.8"; }
-        label { "Tempo de lease padrão (segundos)" input.mono name="lease" value=(lease) placeholder="36000" inputmode="numeric";
-            small { "0 = sem expiração." } }
+        p.muted.span2 { (t("Valem para todos os dispositivos, a menos que a faixa ou a reserva defina outro valor.")) }
+        label { (t("Domínio")) input name="domain" value=(domain) placeholder=(t("empresa.local")); }
+        label { (t("Máscara de rede")) input.mono name="mask" value=(mask) placeholder="255.255.255.0"; }
+        label { (t("Gateway (roteador)")) input.mono name="router" value=(router) placeholder="192.168.0.1"; }
+        label { (t("Servidores DNS")) input.mono name="dns" value=(dns) placeholder="192.168.0.1, 8.8.8.8"; }
+        label { (t("Tempo de lease padrão (segundos)")) input.mono name="lease" value=(lease) placeholder="36000" inputmode="numeric";
+            small { (t("0 = sem expiração.")) } }
     };
     html! {
         (error_box(err))
-        (form_card("/options", rev, csrf, "/", fields, extra, "Outras opções globais no .ini (mantidas como estão):"))
+        (form_card("/options", rev, csrf, "/", fields, extra, n_("Outras opções globais no .ini (mantidas como estão):")))
     }
 }
 
@@ -837,7 +880,7 @@ async fn options_page(State(app): State<Shared>, ctx: Ctx) -> Response {
         &g.extra,
         None,
     );
-    page(&app, &ctx, "Opções globais", "options", "other", form).into_response()
+    page(&app, &ctx, n_("Opções globais"), "options", "other", form).into_response()
 }
 
 async fn options_update(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Fields>) -> Response {
@@ -847,10 +890,10 @@ async fn options_update(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Field
     let opts = OptionsInput { mask: field(&f, "mask"), router: field(&f, "router"), dns: field(&f, "dns"), lease: field(&f, "lease") };
     let domain = field(&f, "domain");
     match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_globals(doc, domain, &opts)).await {
-        Ok(()) => flash(&app, &ctx, true, "Opções globais salvas.", "/options"),
+        Ok(()) => flash(&app, &ctx, true, t("Opções globais salvas."), "/options"),
         Err(e) => {
             let form = options_form(&ctx.s.csrf, field(&f, "rev"), [domain, opts.mask, opts.router, opts.dns, opts.lease], &[], Some(&e));
-            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, "Opções globais", "options", "other", form)).into_response()
+            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Opções globais"), "options", "other", form)).into_response()
         }
     }
 }
@@ -863,26 +906,25 @@ fn account_form(csrf: &str, user: &str, err: Option<&str>) -> Markup {
         form.card.form method="post" action="/account" autocomplete="off" {
             (csrf_input(csrf))
             div.fields {
-                label { "Usuário" input name="username" value=(user) required maxlength="32" autocomplete="username";
-                    small { "Letras, números, ponto, hífen ou sublinhado." } }
-                label { "Senha atual" input type="password" name="current" required autocomplete="current-password"; }
-                label { "Nova senha" input type="password" name="new" required minlength="8" autocomplete="new-password";
-                    small { "Pelo menos 8 caracteres." } }
-                label { "Repita a nova senha" input type="password" name="confirm" required minlength="8" autocomplete="new-password"; }
+                label { (t("Usuário")) input name="username" value=(user) required maxlength="32" autocomplete="username";
+                    small { (t("Letras, números, ponto, hífen ou sublinhado.")) } }
+                label { (t("Senha atual")) input type="password" name="current" required autocomplete="current-password"; }
+                label { (t("Nova senha")) input type="password" name="new" required minlength="8" autocomplete="new-password";
+                    small { (t("Pelo menos 8 caracteres.")) } }
+                label { (t("Repita a nova senha")) input type="password" name="confirm" required minlength="8" autocomplete="new-password"; }
             }
             div.form-actions {
-                a.btn.light href="/" { "Cancelar" }
-                button.btn.primary type="submit" { (icon("check")) "Salvar" }
+                a.btn.light href="/" { (t("Cancelar")) }
+                button.btn.primary type="submit" { (icon("check")) (t("Salvar")) }
             }
         }
-        p.muted.small { "Ao salvar, as outras sessões abertas do painel são encerradas. A nova senha fica gravada (em hash) no "
-            span.mono { "panel.toml" } "." }
+        p.muted.small { (tm("Ao salvar, as outras sessões abertas do painel são encerradas. A nova senha fica gravada (em hash) no {}.", &[html! { span.mono { "panel.toml" } }])) }
     }
 }
 
 async fn account_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     let body = account_form(&ctx.s.csrf, &ctx.s.user, None);
-    page(&app, &ctx, "Minha conta", "account", "other", body).into_response()
+    page(&app, &ctx, n_("Minha conta"), "account", "other", body).into_response()
 }
 
 fn valid_username(u: &str) -> bool {
@@ -897,10 +939,10 @@ async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInf
     let (new, confirm) = (field(&f, "new").to_string(), field(&f, "confirm").to_string());
     let fail = |msg: &str| {
         let body = account_form(&ctx.s.csrf, &user, Some(msg));
-        (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, "Minha conta", "account", "other", body)).into_response()
+        (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Minha conta"), "account", "other", body)).into_response()
     };
     if app.sessions.locked_out(peer.ip()) {
-        return fail("Muitas tentativas. Aguarde 5 minutos.");
+        return fail(t("Muitas tentativas. Aguarde 5 minutos."));
     }
     let current_hash = app.creds.read().unwrap().1.clone();
     let current = field(&f, "current").to_string();
@@ -908,20 +950,20 @@ async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInf
     if !ok {
         app.sessions.record_fail(peer.ip());
         tokio::time::sleep(Duration::from_millis(600)).await;
-        return fail("A senha atual está errada.");
+        return fail(t("A senha atual está errada."));
     }
     if !valid_username(&user) {
-        return fail("Usuário inválido: use de 1 a 32 letras, números, ponto, hífen ou sublinhado.");
+        return fail(t("Usuário inválido: use de 1 a 32 letras, números, ponto, hífen ou sublinhado."));
     }
     if new.chars().count() < 8 {
-        return fail("A nova senha precisa ter pelo menos 8 caracteres.");
+        return fail(t("A nova senha precisa ter pelo menos 8 caracteres."));
     }
     if new != confirm {
-        return fail("A confirmação não confere com a nova senha.");
+        return fail(t("A confirmação não confere com a nova senha."));
     }
     let hash = match tokio::task::spawn_blocking(move || auth::hash_password(&new)).await {
         Ok(Ok(h)) => h,
-        _ => return fail("Não consegui gerar o hash da senha."),
+        _ => return fail(t("Não consegui gerar o hash da senha.")),
     };
     let saved = {
         let _guard = app.write_lock.lock().await;
@@ -935,7 +977,7 @@ async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInf
     };
     if let Err(e) = saved {
         tracing::error!(error = %e, "não consegui gravar a nova senha");
-        return fail(&format!("Não consegui gravar {}: {e}", app.config_path.display()));
+        return fail(&tf!("Não consegui gravar {}: {}", app.config_path.display(), e));
     }
     *app.creds.write().unwrap() = (user.clone(), hash);
     app.default_password.store(false, Ordering::SeqCst);
@@ -943,7 +985,7 @@ async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInf
     app.sessions.clear_fails(peer.ip());
     app.sessions.keep_only(&ctx.token, &user);
     tracing::info!(%user, "usuário/senha do painel alterados");
-    flash(&app, &ctx, true, "Usuário e senha atualizados.", "/")
+    flash(&app, &ctx, true, t("Usuário e senha atualizados."), "/")
 }
 
 // ---------- notificações ----------
@@ -958,7 +1000,7 @@ async fn dismiss_note(State(app): State<Shared>, ctx: Ctx, headers: axum::http::
         "all" => None,
         v => match v.parse() {
             Ok(n) => Some(n),
-            Err(_) => return (StatusCode::BAD_REQUEST, "id inválido").into_response(),
+            Err(_) => return (StatusCode::BAD_REQUEST, t("id inválido").to_string()).into_response(),
         },
     };
     app.monitor.dismiss(id).await;

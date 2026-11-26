@@ -14,6 +14,8 @@ use crate::config::Config;
 use crate::events::{self, Event};
 use crate::ini::IniDoc;
 use crate::leases::{self, Lease};
+use crate::i18n::Msg;
+use crate::msg;
 use crate::notes::{self, Alert, Note};
 use crate::service::{self, Status};
 
@@ -28,7 +30,7 @@ pub const FRESH_FOR: Duration = Duration::from_secs(20);
 pub struct LogInfo {
     pub configured: bool,
     pub path: Option<PathBuf>,
-    pub error: Option<String>,
+    pub error: Option<Msg>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,9 +38,9 @@ pub struct Snapshot {
     pub version: u64,
     pub status: Status,
     pub leases: Vec<Lease>,
-    pub lease_error: Option<String>,
+    pub lease_error: Option<Msg>,
     pub doc: IniDoc,
-    pub ini_error: Option<String>,
+    pub ini_error: Option<Msg>,
     /// MAC -> (quando o lease mudou, se é um dispositivo novo e não uma renovação).
     pub fresh: HashMap<String, (Instant, bool)>,
     /// Mais antigo primeiro.
@@ -206,7 +208,7 @@ impl Monitor {
                     next.leases = list;
                     next.lease_error = None;
                 }
-                Err(e) => next.lease_error = Some(format!("não consegui ler {}: {e}", self.cfg.state_file.display())),
+                Err(e) => next.lease_error = Some(msg!("Não consegui ler {}: {}", self.cfg.state_file.display(), e)),
             }
             changed |= next.leases != old.leases || next.lease_error != old.lease_error;
         }
@@ -222,7 +224,7 @@ impl Monitor {
                     next.doc = IniDoc::parse(&text);
                     next.ini_error = None;
                 }
-                Err(e) => next.ini_error = Some(format!("não consegui ler {}: {e}", self.cfg.ini_file.display())),
+                Err(e) => next.ini_error = Some(msg!("Não consegui ler {}: {}", self.cfg.ini_file.display(), e)),
             }
             changed = true;
         }
@@ -311,7 +313,7 @@ impl Monitor {
                 out.extend(self.read_from(inner, &path));
             }
             Err(_) => {
-                info.error = Some(format!(
+                info.error = Some(msg!(
                     "Arquivo de log {} não encontrado. Inicie o opendhcpd com -l e LogLevel=Normal ou All.",
                     path.display()
                 ))
