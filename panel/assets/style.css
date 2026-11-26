@@ -476,3 +476,15 @@ select.prefix { width: 9.5rem; font-family: var(--mono); font-size: 0.8rem; }
 .net-info .bad { color: rgb(var(--danger)); }
 .lease-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .lease-chips .chip { font-size: 0.72rem; padding: 0.2rem 0.6rem; border: 1px solid rgb(var(--border)); }
+
+/* ---------- dispositivos e reservas ---------- */
+a.dev-link { color: inherit; text-decoration: none; border-bottom: 1px dashed rgb(var(--muted) / 0.5); }
+a.dev-link:hover { color: rgb(var(--primary)); border-bottom-color: rgb(var(--primary)); }
+.vendor { display: inline-block; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.warn-text { color: rgb(180 120 10); font-weight: 600; }
+html.dark .warn-text { color: rgb(var(--warning)); }
+.warn-text:empty { display: none; }
+label.check { flex-direction: row; align-items: center; gap: 0.55rem; font-weight: 500; }
+label.check input { width: auto; }
+dl.opts.dev-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dev-actions { margin-top: 1rem; gap: 0.5rem; }

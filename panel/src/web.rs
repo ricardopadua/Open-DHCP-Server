@@ -21,6 +21,7 @@ use tokio_stream::wrappers::WatchStream;
 
 use crate::auth::{self, Session, Sessions};
 use crate::config::Config;
+use crate::devices::{DeviceInfo, DeviceStore, Oui, MAX_ALIAS, MAX_NOTES};
 use crate::dhcp::{self, OptionsInput, RangeSetInput, ReservationInput};
 use crate::ini::IniDoc;
 use crate::leases;
@@ -48,6 +49,16 @@ pub struct App {
     creds: RwLock<(String, String)>,
     default_password: AtomicBool,
     restart_rev: std::sync::atomic::AtomicU64,
+    /// Apelidos e anotações dos dispositivos (arquivo do painel, fora do .ini).
+    devices: DeviceStore,
+    /// Fabricantes por MAC.
+    oui: Oui,
+}
+
+impl App {
+    fn dev(&self) -> views::Dev<'_> {
+        views::Dev { store: &self.devices, oui: &self.oui }
+    }
 }
 
 fn restart_alert(app: &App) -> Alert {
@@ -79,6 +90,8 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         creds,
         default_password: AtomicBool::new(default_password),
         restart_rev: std::sync::atomic::AtomicU64::new(0),
+        devices: DeviceStore::open(cfg.data_dir.join("devices.json")),
+        oui: Oui::load(cfg.oui_file.as_deref()),
         cfg,
         sessions: Sessions::default(),
         monitor,
@@ -96,6 +109,9 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         .route("/leases", get(leases_page))
         .route("/leases/release", post(release_lease))
         .route("/reservations", get(reservations_page))
+        .route("/reservations.csv", get(reservations_csv))
+        .route("/reservations/import", get(import_page).post(import_save))
+        .route("/devices/{mac}", get(device_page).post(device_update))
         .route("/reservations/new", get(reservation_new).post(reservation_create))
         .route("/reservations/{n}/edit", get(reservation_edit).post(reservation_update))
         .route("/reservations/{n}/delete", post(reservation_delete))
@@ -290,7 +306,7 @@ struct LiveQuery {
 }
 
 /// Pedaços (seletor -> HTML) que a página `page` atualiza.
-fn live_patch(snap: &Snapshot, page: &str, csrf: &str) -> serde_json::Map<String, serde_json::Value> {
+fn live_patch(snap: &Snapshot, page: &str, csrf: &str, dev: views::Dev) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
     let mut put = |k: &str, v: Markup| {
         m.insert(k.to_string(), serde_json::Value::String(v.into_string()));
@@ -311,7 +327,7 @@ fn live_patch(snap: &Snapshot, page: &str, csrf: &str) -> serde_json::Map<String
         }
         "leases" => {
             put("#lease-count", views::frag_lease_count(snap));
-            put("#lease-wrap", views::frag_lease_table(snap, csrf));
+            put("#lease-wrap", views::frag_lease_table(snap, csrf, dev));
         }
         "activity" => {
             put("#act-stats", views::frag_activity_stats(snap));
@@ -336,7 +352,7 @@ async fn live(
             return Ok(SseEvent::default().event("logout").data("1"));
         }
         let snap = app.monitor.snapshot();
-        let patch = LANG.sync_scope(lang, || live_patch(&snap, &page, &csrf));
+        let patch = LANG.sync_scope(lang, || live_patch(&snap, &page, &csrf, app.dev()));
         Ok(SseEvent::default().event("patch").data(serde_json::Value::Object(patch).to_string()))
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
@@ -410,7 +426,7 @@ async fn activity_page(State(app): State<Shared>, ctx: Ctx) -> Response {
 
 async fn leases_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     let snap = app.monitor.snapshot();
-    let body = views::leases_body(&snap, &ctx.s.csrf, &app.cfg.state_file.display().to_string());
+    let body = views::leases_body(&snap, &ctx.s.csrf, &app.cfg.state_file.display().to_string(), app.dev());
     page(&app, &ctx, n_("Leases ativos"), "leases", "leases", body).into_response()
 }
 
@@ -527,6 +543,8 @@ async fn reservations_page(State(app): State<Shared>, ctx: Ctx) -> Response {
                 h2.card-title { (tf!("{} reserva(s)", list.len())) }
                 div.row {
                     label.search { (icon("search")) input type="search" placeholder=(t("Filtrar")) data-filter="#res-table" aria-label=(t("Filtrar")); }
+                    a.btn.light href="/reservations.csv" download="reservations.csv" { (icon("download")) (t("Exportar CSV")) }
+                    a.btn.light href="/reservations/import" { (icon("upload")) (t("Importar CSV")) }
                     a.btn.primary href="/reservations/new" { (icon("plus")) (t("Nova reserva")) }
                 }
             }
@@ -535,14 +553,14 @@ async fn reservations_page(State(app): State<Shared>, ctx: Ctx) -> Response {
             } @else {
                 div.table-wrap {
                     table #res-table {
-                        thead { tr { th { "MAC" } th { "IP" } th { (t("Nome do host")) } th { (t("Agora")) } th { (t("Outras opções")) } th.actions { "" } } }
+                        thead { tr { th { "MAC" } th { "IP" } th { (t("Nome")) } th { (t("Agora")) } th { (t("Outras opções")) } th.actions { "" } } }
                         tbody {
                             @for r in &list {
                                 @let online = snap.leases.iter().any(|l| l.mac == r.mac && l.is_active(now));
                                 tr {
-                                    td.mono { (r.mac) }
+                                    td { (views::mac_cell(app.dev(), &r.mac)) }
                                     td.mono { @match &r.ip { Some(ip) => (ip), None => span.tag.bad { (icon("lock")) (t("Bloqueado")) } } }
-                                    td { @match &r.hostname { Some(h) => (h), None => span.muted { "—" } } }
+                                    td { (views::name_cell(app.dev(), &r.mac, r.hostname.as_deref().unwrap_or(""))) }
                                     td { @if online { span.badge.ok { span.dot {} (t("Com IP")) } } @else { span.muted.small { (t("sem lease")) } } }
                                     td { @if r.extra.is_empty() { span.muted { "—" } } @else { span.tag { (tf!("{} opção(ões)", r.extra.len())) } } }
                                     td.actions { a.btn.small.light href={"/reservations/" (r.n) "/edit"} { (icon("edit")) (t("Editar")) } }
@@ -557,7 +575,58 @@ async fn reservations_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     page(&app, &ctx, n_("Reservas"), "reservations", "other", body).into_response()
 }
 
+/// Ajuda do formulário de reserva: IP livre sugerido e IPs ocupados (para o aviso ao digitar).
+struct ResHints {
+    suggest: Option<String>,
+    /// JSON: ip → [mac, nome] dos leases ativos.
+    used: String,
+    /// JSON: ip → mac das outras reservas.
+    reserved: String,
+}
+
+fn device_label(app: &App, mac: &str, hostname: &str) -> String {
+    app.devices.alias(mac).or_else(|| (!hostname.is_empty()).then(|| hostname.to_string())).unwrap_or_else(|| mac.to_string())
+}
+
+fn res_hints(app: &App, doc: &IniDoc, own_mac: &str) -> ResHints {
+    let snap = app.monitor.snapshot();
+    let now = views::now_ts();
+    let own = crate::ini::normalize_mac(own_mac).unwrap_or_default();
+    let active: Vec<&crate::leases::Lease> = snap.leases.iter().filter(|l| l.is_active(now)).collect();
+    let in_use: Vec<std::net::Ipv4Addr> = active.iter().filter(|l| l.mac != own).map(|l| l.ip).collect();
+    let used: serde_json::Map<String, serde_json::Value> = active
+        .iter()
+        .map(|l| (l.ip.to_string(), serde_json::json!([l.mac, device_label(app, &l.mac, &l.hostname)])))
+        .collect();
+    let reserved: serde_json::Map<String, serde_json::Value> = dhcp::reservations(doc)
+        .into_iter()
+        .filter(|r| r.mac != own)
+        .filter_map(|r| Some((r.ip?, serde_json::Value::String(r.mac))))
+        .collect();
+    ResHints {
+        suggest: dhcp::suggest_ip(doc, &in_use).map(|ip| ip.to_string()),
+        used: serde_json::Value::Object(used).to_string(),
+        reserved: serde_json::Value::Object(reserved).to_string(),
+    }
+}
+
+/// O IP já está com outro dispositivo agora? (a reserva faria os dois brigarem pelo mesmo IP)
+fn lease_conflict(app: &App, ip: &str, mac: &str) -> Option<String> {
+    let ip: std::net::Ipv4Addr = ip.trim().parse().ok()?;
+    let mac = crate::ini::normalize_mac(mac)?;
+    let snap = app.monitor.snapshot();
+    let now = views::now_ts();
+    let l = snap.leases.iter().find(|l| l.is_active(now) && l.ip == ip && l.mac != mac)?;
+    Some(tf!(
+        "O IP {} está em uso agora por {} ({}). Escolha outro IP ou libere o lease antes.",
+        ip,
+        device_label(app, &l.mac, &l.hostname),
+        l.mac
+    ))
+}
+
 struct ResForm<'a> {
+    hints: &'a ResHints,
     n: Option<usize>,
     rev: &'a str,
     mac: &'a str,
@@ -570,8 +639,17 @@ struct ResForm<'a> {
 fn reservation_form(csrf: &str, rf: ResForm) -> Markup {
     let action = match rf.n { Some(n) => format!("/reservations/{n}/edit"), None => "/reservations/new".into() };
     let fields = html! {
-        label { (t("Endereço MAC")) input.mono name="mac" value=(rf.mac) placeholder="00:11:22:33:44:55" required; }
-        label { (t("IP fixo")) input.mono name="ip" value=(rf.ip) placeholder="192.168.0.50";
+        label { (t("Endereço MAC")) input.mono name="mac" value=(rf.mac) placeholder="00:11:22:33:44:55" required data-res-mac; }
+        label { (t("IP fixo"))
+            div.input-group {
+                input.mono name="ip" value=(rf.ip) placeholder="192.168.0.50" autocomplete="off" data-res-ip
+                    data-used=(rf.hints.used) data-reserved=(rf.hints.reserved)
+                    data-t-used=(t("Em uso agora por {} ({})")) data-t-reserved=(t("Já reservado para {}"));
+                @if let Some(sug) = &rf.hints.suggest {
+                    button.btn.light type="button" data-suggest-ip=(sug) title=(tf!("Usar {}", sug)) { (icon("bolt")) (t("IP livre")) }
+                }
+            }
+            small.warn-text #ip-warn aria-live="polite" {}
             small { (t("Deixe vazio para bloquear o dispositivo (ele nunca recebe IP).")) } }
         label { (t("Nome do host (opcional)")) input name="hostname" value=(rf.hostname) placeholder=(t("impressora-sala")); }
     };
@@ -584,14 +662,19 @@ fn reservation_form(csrf: &str, rf: ResForm) -> Markup {
     }
 }
 
+fn current_doc(app: &App) -> IniDoc {
+    load_ini(&app.cfg.ini_file).map(|l| l.doc).unwrap_or_else(|_| IniDoc::parse(""))
+}
+
 async fn reservation_new(State(app): State<Shared>, ctx: Ctx, Query(q): Query<Fields>) -> Response {
     let loaded = match load_ini(&app.cfg.ini_file) {
         Ok(l) => l,
         Err(e) => return flash(&app, &ctx, false, e, "/reservations"),
     };
+    let hints = res_hints(&app, &loaded.doc, field(&q, "mac"));
     let form = reservation_form(
         &ctx.s.csrf,
-        ResForm { n: None, rev: &loaded.rev, mac: field(&q, "mac"), ip: field(&q, "ip"), hostname: field(&q, "hostname"), extra: &[], err: None },
+        ResForm { hints: &hints, n: None, rev: &loaded.rev, mac: field(&q, "mac"), ip: field(&q, "ip"), hostname: field(&q, "hostname"), extra: &[], err: None },
     );
     page(&app, &ctx, n_("Nova reserva"), "reservations", "other", form).into_response()
 }
@@ -601,12 +684,17 @@ async fn reservation_create(State(app): State<Shared>, ctx: Ctx, Form(f): Form<F
         return r;
     }
     let input = ReservationInput { mac: field(&f, "mac"), ip: field(&f, "ip"), hostname: field(&f, "hostname") };
-    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::add_reservation(doc, &input)).await {
+    let result = match lease_conflict(&app, input.ip, input.mac) {
+        Some(e) => Err(e),
+        None => mutate_ini(&app, field(&f, "rev"), |doc| dhcp::add_reservation(doc, &input)).await,
+    };
+    match result {
         Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} criada.", mac), "/reservations"),
         Err(e) => {
+            let hints = res_hints(&app, &current_doc(&app), input.mac);
             let form = reservation_form(
                 &ctx.s.csrf,
-                ResForm { n: None, rev: field(&f, "rev"), mac: input.mac, ip: input.ip, hostname: input.hostname, extra: &[], err: Some(&e) },
+                ResForm { hints: &hints, n: None, rev: field(&f, "rev"), mac: input.mac, ip: input.ip, hostname: input.hostname, extra: &[], err: Some(&e) },
             );
             (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Nova reserva"), "reservations", "other", form)).into_response()
         }
@@ -621,9 +709,11 @@ async fn reservation_edit(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPa
     let Some(r) = dhcp::reservations(&loaded.doc).into_iter().find(|r| r.n == n) else {
         return flash(&app, &ctx, false, t("Reserva não encontrada."), "/reservations");
     };
+    let hints = res_hints(&app, &loaded.doc, &r.mac);
     let form = reservation_form(
         &ctx.s.csrf,
         ResForm {
+            hints: &hints,
             n: Some(n),
             rev: &loaded.rev,
             mac: &r.mac,
@@ -641,14 +731,222 @@ async fn reservation_update(State(app): State<Shared>, ctx: Ctx, UrlPath(n): Url
         return r;
     }
     let input = ReservationInput { mac: field(&f, "mac"), ip: field(&f, "ip"), hostname: field(&f, "hostname") };
-    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_reservation(doc, n, &input)).await {
+    let result = match lease_conflict(&app, input.ip, input.mac) {
+        Some(e) => Err(e),
+        None => mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_reservation(doc, n, &input)).await,
+    };
+    match result {
         Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} atualizada.", mac), "/reservations"),
         Err(e) => {
+            let hints = res_hints(&app, &current_doc(&app), input.mac);
             let form = reservation_form(
                 &ctx.s.csrf,
-                ResForm { n: Some(n), rev: field(&f, "rev"), mac: input.mac, ip: input.ip, hostname: input.hostname, extra: &[], err: Some(&e) },
+                ResForm { hints: &hints, n: Some(n), rev: field(&f, "rev"), mac: input.mac, ip: input.ip, hostname: input.hostname, extra: &[], err: Some(&e) },
             );
             (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Editar reserva"), "reservations", "other", form)).into_response()
+        }
+    }
+}
+
+// ---------- importar / exportar reservas ----------
+
+async fn reservations_csv(State(app): State<Shared>, ctx: Ctx) -> Response {
+    match load_ini(&app.cfg.ini_file) {
+        Ok(l) => (
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=\"reservations.csv\""),
+            ],
+            dhcp::export_csv(&l.doc),
+        )
+            .into_response(),
+        Err(e) => flash(&app, &ctx, false, e, "/reservations"),
+    }
+}
+
+fn import_form(csrf: &str, rev: &str, csv: &str, update: bool, err: Option<&str>) -> Markup {
+    html! {
+        (error_box(err))
+        form.card.form method="post" action="/reservations/import" {
+            (csrf_input(csrf))
+            input type="hidden" name="rev" value=(rev);
+            div.fields {
+                p.muted.span2 { (tm("Uma linha por dispositivo: {}. Sem IP, o dispositivo fica bloqueado. Aceita vírgula ou ponto e vírgula e o cabeçalho é opcional; é o mesmo formato do {}.", &[html! { code { "mac,ip,hostname" } }, html! { a href="/reservations.csv" download="reservations.csv" { (t("Exportar CSV")) } }])) }
+                label.span2 { (t("Arquivo CSV"))
+                    input type="file" accept=".csv,text/csv,text/plain" data-csv-file; }
+                label.span2 { (t("Conteúdo"))
+                    textarea.mono name="csv" rows="10" placeholder="mac,ip,hostname\n00:11:22:33:44:55,192.168.0.50,impressora\n00:11:22:33:44:66,," required data-csv-text { (csv) } }
+                label.check.span2 {
+                    input type="checkbox" name="update" value="1" checked[update];
+                    span { (t("Atualizar as reservas que já existem (pelo MAC) em vez de recusar a importação")) }
+                }
+            }
+            p.muted.small { (t("A importação é tudo ou nada: se uma linha tiver erro, nenhuma reserva é gravada.")) }
+            div.form-actions {
+                a.btn.light href="/reservations" { (t("Cancelar")) }
+                button.btn.primary type="submit" { (icon("upload")) (t("Importar")) }
+            }
+        }
+    }
+}
+
+async fn import_page(State(app): State<Shared>, ctx: Ctx) -> Response {
+    let loaded = match load_ini(&app.cfg.ini_file) {
+        Ok(l) => l,
+        Err(e) => return flash(&app, &ctx, false, e, "/reservations"),
+    };
+    let form = import_form(&ctx.s.csrf, &loaded.rev, "", false, None);
+    page(&app, &ctx, n_("Importar reservas"), "reservations", "other", form).into_response()
+}
+
+async fn import_save(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Fields>) -> Response {
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let (csv, update) = (field(&f, "csv"), field(&f, "update") == "1");
+    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::import_csv(doc, csv, update)).await {
+        Ok(r) => flash(&app, &ctx, true, tf!("Importação concluída: {} reserva(s) criada(s), {} atualizada(s).", r.created, r.updated), "/reservations"),
+        Err(e) => {
+            let form = import_form(&ctx.s.csrf, field(&f, "rev"), csv, update, Some(&e));
+            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Importar reservas"), "reservations", "other", form)).into_response()
+        }
+    }
+}
+
+// ---------- dispositivo ----------
+
+async fn device_page(State(app): State<Shared>, ctx: Ctx, UrlPath(mac): UrlPath<String>) -> Response {
+    let Some(mac) = crate::ini::normalize_mac(&mac) else {
+        return flash(&app, &ctx, false, t("MAC inválido."), "/leases");
+    };
+    let body = device_body(&app, &ctx, &mac, &app.devices.get(&mac), None);
+    page(&app, &ctx, n_("Dispositivo"), "leases", "other", body).into_response()
+}
+
+fn device_body(app: &App, ctx: &Ctx, mac: &str, info: &DeviceInfo, err: Option<&str>) -> Markup {
+    let snap = app.monitor.snapshot();
+    let now = views::now_ts();
+    let now_l = views::now_local();
+    let dev = app.dev();
+    let lease = snap.leases.iter().find(|l| l.mac == mac && l.is_active(now));
+    let res = dhcp::reservations(&current_doc(app)).into_iter().find(|r| r.mac == mac);
+    let hostname = lease.map(|l| l.hostname.clone()).filter(|h| !h.is_empty()).or_else(|| res.as_ref().and_then(|r| r.hostname.clone()));
+    let name = (!info.alias.is_empty()).then(|| info.alias.clone()).or(hostname.clone()).unwrap_or_else(|| mac.to_string());
+    let events: Vec<&crate::events::Event> = snap.events.iter().rev().filter(|e| e.mac.as_deref() == Some(mac)).take(200).collect();
+    html! {
+        (error_box(err))
+        section.grid.g-2 {
+            div.card {
+                div.card-head { h2.card-title { (icon("devices")) " " (name) } }
+                dl.opts.dev-facts {
+                    div { dt { "MAC" } dd.mono { (mac) } }
+                    div { dt { (t("Fabricante")) } dd { (dev.vendor(mac).unwrap_or_else(|| t("Desconhecido").to_string())) } }
+                    div { dt { (t("Nome do host")) } dd { (hostname.as_deref().unwrap_or("—")) } }
+                    div { dt { (t("Apelido")) } dd { @if info.alias.is_empty() { "—" } @else { (info.alias) } } }
+                }
+            }
+            div.card {
+                div.card-head { h2.card-title { (t("Agora")) } }
+                @match lease {
+                    Some(l) => {
+                        @let (when, rel) = views::fmt_expiry(l.expiry, now);
+                        dl.opts.dev-facts {
+                            div { dt { "IP" } dd.mono { (l.ip) } }
+                            div { dt { (t("Expira")) } dd { (when) " " span.muted.small { (rel) } } }
+                            div { dt { (t("Tipo")) } dd { @if res.is_some() { span.tag.info { (t("Reserva")) } } @else { span.tag { (t("Dinâmico")) } } } }
+                        }
+                    }
+                    None => { p.empty { (t("Sem lease ativo no momento.")) } }
+                }
+                div.row.dev-actions {
+                    @match &res {
+                        Some(r) => {
+                            a.btn.light.small href={"/reservations/" (r.n) "/edit"} { (icon("edit")) (t("Editar reserva")) }
+                        }
+                        None => {
+                            a.btn.light.small href={"/reservations/new?mac=" (mac) "&ip=" (lease.map(|l| l.ip.to_string()).unwrap_or_default()) "&hostname=" (views::url_enc(hostname.as_deref().unwrap_or("")))} {
+                                (icon("pin")) (t("Fixar IP"))
+                            }
+                        }
+                    }
+                    @if let Some(l) = lease {
+                        form.inline method="post" action="/leases/release"
+                            data-confirm=(tf!("Liberar o IP {} de {}? O serviço DHCP será parado e iniciado de novo por alguns segundos.", l.ip, l.mac)) {
+                            (csrf_input(&ctx.s.csrf))
+                            input type="hidden" name="mac" value=(mac);
+                            button.btn.small.soft-danger type="submit" { (t("Liberar")) }
+                        }
+                    }
+                }
+            }
+        }
+        form.card.form method="post" action={"/devices/" (mac)} {
+            (csrf_input(&ctx.s.csrf))
+            div.fields {
+                label { (t("Apelido"))
+                    input name="alias" value=(info.alias) maxlength=(MAX_ALIAS) placeholder=(t("Impressora do RH"));
+                    small { (t("Aparece no lugar do nome do host nas listas.")) } }
+                label.span2 { (t("Anotações"))
+                    textarea name="notes" rows="3" maxlength=(MAX_NOTES) placeholder=(t("Onde fica, quem usa, número de patrimônio...")) { (info.notes) } }
+            }
+            p.muted.small { (tf!("Guardado no painel ({}), não no opendhcp.ini.", app.devices.path().display())) }
+            div.form-actions { button.btn.primary type="submit" { (icon("check")) (t("Salvar")) } }
+        }
+        section.card {
+            div.card-head { h2.card-title { (t("Histórico")) } }
+            @if events.is_empty() {
+                p.empty { (t("Nenhum evento deste dispositivo no histórico em memória.")) }
+            } @else {
+                div.table-wrap {
+                    table {
+                        thead { tr { th { (t("Quando")) } th { (t("Evento")) } th { (t("Descrição")) } th { "IP" } } }
+                        tbody {
+                            @for e in &events {
+                                tr {
+                                    td.nowrap { (e.ts.map(|t| t.format("%d/%m %H:%M:%S").to_string()).unwrap_or_default()) " " span.muted.small { (views::ago_pub(e.ts, now_l)) } }
+                                    td { span.tag.(e.kind.tone()) { (e.kind.label()) } }
+                                    td { (crate::events::describe(e)) }
+                                    td.mono { @if !matches!(e.kind, crate::events::Kind::NoRange) { (e.ip.as_deref().unwrap_or("")) } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            p.hint { (t("O histórico vem dos eventos do log que o painel guarda em memória (os mais recentes).")) }
+        }
+    }
+}
+
+fn clean_text(s: &str, max: usize, multiline: bool) -> Result<String, String> {
+    let s = s.trim();
+    if s.chars().count() > max {
+        return Err(tf!("Texto longo demais (máximo de {} caracteres).", max));
+    }
+    if s.chars().any(|c| c.is_control() && !(multiline && matches!(c, '\n' | '\r' | '\t'))) {
+        return Err(t("O texto tem caracteres inválidos.").to_string());
+    }
+    Ok(s.replace("\r\n", "\n"))
+}
+
+async fn device_update(State(app): State<Shared>, ctx: Ctx, UrlPath(mac): UrlPath<String>, Form(f): Form<Fields>) -> Response {
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let Some(mac) = crate::ini::normalize_mac(&mac) else {
+        return flash(&app, &ctx, false, t("MAC inválido."), "/leases");
+    };
+    let info = DeviceInfo { alias: field(&f, "alias").trim().to_string(), notes: field(&f, "notes").to_string() };
+    let checked = clean_text(&info.alias, MAX_ALIAS, false).and_then(|alias| Ok(DeviceInfo { alias, notes: clean_text(&info.notes, MAX_NOTES, true)? }));
+    let saved = checked.and_then(|i| app.devices.set(&mac, i).map_err(|e| tf!("Não consegui gravar {}: {}", app.devices.path().display(), e)));
+    match saved {
+        Ok(()) => {
+            app.monitor.poke().await; // as listas ao vivo mostram o apelido novo
+            flash(&app, &ctx, true, t("Dados do dispositivo salvos."), &format!("/devices/{mac}"))
+        }
+        Err(e) => {
+            let body = device_body(&app, &ctx, &mac, &info, Some(&e));
+            (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Dispositivo"), "leases", "other", body)).into_response()
         }
     }
 }
