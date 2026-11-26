@@ -1,6 +1,6 @@
 [package]
 name = "opendhcp-panel"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2021"
 description = "Painel web de administração para o Open DHCP Server"
 license = "GPL-2.0-only"
