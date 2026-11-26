@@ -10,7 +10,7 @@ Type=forking
 ExecStart=/opt/opendhcp/opendhcpd -i /opt/opendhcp/opendhcp.ini -s /var/lib/opendhcp/opendhcp.state -l /opt/opendhcp/log/opendhcp%%Y%%m%%d.log
 # Pasta do estado só do root; o arquivo de estado com o grupo do painel, que o lê e, ao liberar
 # um lease, o regrava ("+": roda fora do isolamento, que tira o poder de trocar o grupo).
-ExecStartPre=+/bin/sh -c 'install -d -m 0750 /var/lib/opendhcp && touch /var/lib/opendhcp/opendhcp.state && if getent group opendhcp-panel >/dev/null; then chgrp opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp/opendhcp.state && chmod 0660 /var/lib/opendhcp/opendhcp.state; fi'
+ExecStartPre=+/bin/sh -c 'install -d -m 0750 /var/lib/opendhcp && chmod 0750 /var/lib/opendhcp && touch /var/lib/opendhcp/opendhcp.state && if getent group opendhcp-panel >/dev/null; then chgrp opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp/opendhcp.state && chmod 0660 /var/lib/opendhcp/opendhcp.state; fi'
 Restart=on-failure
 
 # O opendhcpd exige uid 0, mas só precisa abrir a porta 67: o resto dos poderes de root fica fora.

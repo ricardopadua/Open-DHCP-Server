@@ -211,7 +211,9 @@ impl Monitor {
 
         // leases
         let s = sig(&self.cfg.state_file);
-        if force || s != inner.state_sig || old.version == 0 {
+        // com erro de leitura, tenta de novo a cada ciclo: corrigir a permissão do arquivo não
+        // muda data nem tamanho, e o erro ficaria na tela para sempre
+        if force || s != inner.state_sig || old.version == 0 || old.lease_error.is_some() {
             inner.state_sig = s;
             match leases::read(&self.cfg.state_file) {
                 Ok(list) => {
@@ -238,7 +240,7 @@ impl Monitor {
 
         // .ini
         let s = sig(&self.cfg.ini_file);
-        if force || s != inner.ini_sig || old.version == 0 {
+        if force || s != inner.ini_sig || old.version == 0 || old.ini_error.is_some() {
             inner.ini_sig = s;
             match std::fs::read(&self.cfg.ini_file) {
                 Ok(b) => {
