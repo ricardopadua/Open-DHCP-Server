@@ -17,11 +17,12 @@ for f in usr/lib/systemd/system/opendhcp.service usr/lib/systemd/system/opendhcp
 done
 [ -e /opt/opendhcp/opendhcp.ini ] || install -Dm644 opt/opendhcp/opendhcp.ini /opt/opendhcp/opendhcp.ini
 [ -e /etc/opendhcp-panel/panel.toml ] || install -Dm600 etc/opendhcp-panel/panel.toml /etc/opendhcp-panel/panel.toml
-mkdir -p /opt/opendhcp/log /var/lib/opendhcp-panel
+mkdir -p /opt/opendhcp/log
+install -d -m 0700 /var/lib/opendhcp /var/lib/opendhcp-panel
 
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable --now opendhcp-panel.service
 fi
-echo "Pronto. Abra o Open DHCP pelo menu de aplicativos (usuário admin, senha admin)."
+echo "Pronto. Abra o Open DHCP pelo menu de aplicativos (usuário admin, senha admin; o painel pede a troca no primeiro acesso)."
 echo "O servidor DHCP não foi iniciado: ajuste o opendhcp.ini pelo painel e clique em Iniciar."

@@ -5,13 +5,33 @@ After=network-online.target
 
 [Service]
 ExecStart=/usr/bin/opendhcp-panel serve -c /etc/opendhcp-panel/panel.toml
-# Precisa gravar o .ini, o arquivo de estado e chamar systemctl para a unit opendhcp.
+# Precisa gravar o .ini, o arquivo de estado, a própria configuração (troca de senha) e chamar
+# systemctl para a unit opendhcp; nenhum poder extra de root além disso.
 User=root
 StateDirectory=opendhcp-panel
-NoNewPrivileges=true
-ProtectHome=true
-PrivateTmp=false
+StateDirectoryMode=0700
+UMask=0077
 Restart=on-failure
+
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=-/opt/opendhcp -/etc/opendhcp-panel -/var/lib/opendhcp -/var/lib/opendhcp-panel
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

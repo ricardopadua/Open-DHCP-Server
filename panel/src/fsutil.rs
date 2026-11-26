@@ -1,23 +1,47 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Grava em `arquivo.tmp` no mesmo diretório, faz fsync e renomeia por cima do original.
+/// Grava num temporário do mesmo diretório, faz fsync e renomeia por cima do original.
+///
+/// O temporário tem nome imprevisível e é criado com `create_new` (não segue nem reaproveita um
+/// link ou arquivo plantado por outro usuário) e já com a permissão do original, ou 0600 para
+/// arquivo novo; assim o conteúdo nunca fica legível por outros durante a gravação.
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = tmp_path(path);
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
+    let mode = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let tmp = loop {
+        let candidate = tmp_path(path);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(mode.as_ref().map(|p| p.mode() & 0o7777).unwrap_or(0o600));
+        }
+        match opts.open(&candidate) {
+            Ok(mut f) => {
+                let written = f.write_all(data).and_then(|_| f.sync_all());
+                if let Err(e) = written {
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(e);
+                }
+                break candidate;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    if let Some(p) = mode {
+        let _ = std::fs::set_permissions(&tmp, p);
     }
-    if let Ok(meta) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(".panel-tmp");
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(".{}.tmp", crate::auth::random_token().get(..16).unwrap_or("x")));
     path.with_file_name(name)
 }
 
@@ -55,6 +79,12 @@ pub fn backup(path: &Path, dir: &Path, keep: usize) -> std::io::Result<Option<Pa
         return Ok(None);
     }
     std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        // backups têm a configuração inteira: só o dono lê
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
     let base = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f");
     let dest = dir.join(format!("{base}.{stamp}"));

@@ -13,7 +13,7 @@
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use tao::dpi::LogicalSize;
@@ -168,8 +168,16 @@ button:disabled {{ opacity:.6; cursor:wait; }}
     )
 }
 
+/// Texto como literal JavaScript seguro (escapa aspas, quebras de linha e `</script>`).
 fn serde_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/")
+}
+
+/// `esquema://host:porta` de uma URL (sem caminho).
+fn origin_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    (!host.is_empty()).then(|| format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase()))
 }
 
 // ---------- de onde vem o painel ----------
@@ -205,7 +213,20 @@ fn user_config() -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("panel.toml");
     if !path.exists() {
-        std::fs::write(&path, default_config(&dir)?)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600); // tem o hash da senha
+        }
+        use std::io::Write;
+        opts.open(&path)?.write_all(default_config(&dir)?.as_bytes())?;
+    }
+    // O aplicativo entra pelo link de uso único: a senha de fábrica vira uma aleatória, para que
+    // outro usuário da máquina não entre no painel embutido com admin/admin.
+    if let Err(e) = opendhcp_panel::replace_default_password(&path) {
+        tracing::warn!(error = %e, "não consegui trocar a senha padrão do painel embutido");
     }
     Ok(path)
 }
@@ -215,6 +236,7 @@ fn toml_str(p: &Path) -> String {
 }
 
 fn default_config(dir: &Path) -> anyhow::Result<String> {
+    // provisória: user_config troca logo em seguida por uma senha aleatória (OsRng)
     let hash = opendhcp_panel::hash_password("admin")?;
     let data = toml_str(dir);
     let backups = toml_str(&dir.join("backups"));
@@ -235,7 +257,7 @@ log_file = 'C:\OpenDHCPServer\log\OpenDHCPServer%Y%m%d.log'"
         )
     } else {
         (
-            "ini_file = '/opt/opendhcp/opendhcp.ini'\nstate_file = '/tmp/opendhcp.state'\nlog_file = '/opt/opendhcp/log/opendhcp%Y%m%d.log'".to_string(),
+            "ini_file = '/opt/opendhcp/opendhcp.ini'\nstate_file = '/var/lib/opendhcp/opendhcp.state'\nlog_file = '/opt/opendhcp/log/opendhcp%Y%m%d.log'".to_string(),
             [("status", "is-active"), ("start", "start"), ("stop", "stop"), ("restart", "restart")]
                 .iter()
                 .map(|(k, a)| {
@@ -253,7 +275,7 @@ log_file = 'C:\OpenDHCPServer\log\OpenDHCPServer%Y%m%d.log'"
         "# Open DHCP: configuração do painel embutido no aplicativo.\n\
          # Ajuste os caminhos para os mesmos usados pelo servidor DHCP.\n\
          listen = \"127.0.0.1:0\"\n{paths}\nbackup_dir = {backups}\ndata_dir = {data}\n\n\
-         [auth]\nusername = \"admin\"\n# senha inicial: admin (troque em Minha conta)\npassword_hash = \"{hash}\"\n\n\
+         [auth]\nusername = \"admin\"\n# senha aleatória: o aplicativo entra sozinho (link de uso único)\npassword_hash = \"{hash}\"\n\n\
          [service]\n{service}\n"
     ))
 }
@@ -273,7 +295,7 @@ fn start_embedded(config: &Path) -> Result<String, StartError> {
         rt.block_on(async move {
             match opendhcp_panel::start(config).await {
                 Ok(server) => {
-                    let _ = tx.send(Ok(format!("http://{}/", server.local_addr())));
+                    let _ = tx.send(Ok(format!("http://{}{}", server.local_addr(), server.login_link())));
                     if let Err(e) = server.run().await {
                         tracing::error!(error = %e, "o painel embutido parou");
                     }
@@ -291,18 +313,24 @@ fn start_embedded(config: &Path) -> Result<String, StartError> {
     rx.recv_timeout(Duration::from_secs(30)).map_err(|e| StartError::Other(e.to_string()))?
 }
 
-/// Cria o opendhcp.ini numa pasta do sistema, pedindo a senha de administrador (polkit).
+/// Cria o opendhcp.ini numa pasta do sistema, pedindo a senha de administrador (polkit). O
+/// conteúdo vai pela entrada padrão (nada de arquivo temporário em /tmp) e um arquivo que já
+/// exista nunca é sobrescrito.
 fn create_ini_as_admin(ini: &Path) -> Result<(), String> {
-    let tmp = std::env::temp_dir().join(format!("opendhcp-{}.ini", std::process::id()));
-    std::fs::write(&tmp, opendhcp_panel::DEFAULT_INI).map_err(|e| e.to_string())?;
-    let status = std::process::Command::new("pkexec")
-        .args(["install", "-D", "-m", "644"])
-        .arg(&tmp)
+    use std::io::Write;
+    let script = r#"set -e; [ -e "$1" ] && exit 3; mkdir -p "$(dirname "$1")"; umask 022; cat > "$1""#;
+    let mut child = std::process::Command::new("pkexec")
+        .args(["sh", "-c", script, "sh"])
         .arg(ini)
-        .status();
-    let _ = std::fs::remove_file(&tmp);
-    match status {
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(opendhcp_panel::DEFAULT_INI.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    match child.wait() {
         Ok(s) if s.success() => Ok(()),
+        Ok(s) if s.code() == Some(3) => Err(format!("{} já existe", ini.display())),
         Ok(s) => Err(format!("pkexec: {s}")),
         Err(e) => Err(e.to_string()),
     }
@@ -341,20 +369,71 @@ fn window_icon() -> Option<Icon> {
 }
 
 fn downloads_dir() -> PathBuf {
-    dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir)
+    // nunca a pasta pessoal: um nome como ".bashrc" vindo do servidor iria parar lá
+    dirs::download_dir().unwrap_or_else(std::env::temp_dir)
 }
 
-fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEvent>) -> wry::Result<WebView> {
+/// Destino de um download: nome sem pastas, sem ponto no começo e sem caracteres de controle,
+/// e sem sobrescrever um arquivo que já exista.
+fn download_target(suggested: &Path) -> PathBuf {
+    let name = suggested.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let name = if name.is_empty() || name.starts_with('.') || name.chars().any(|c| c.is_control()) { "download" } else { name };
+    let dir = downloads_dir();
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((a, b)) if !a.is_empty() => (a.to_string(), format!(".{b}")),
+        _ => (name.to_string(), String::new()),
+    };
+    let mut path = dir.join(name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    path
+}
+
+/// O que a janela pode fazer agora: as ações internas (IPC) só valem na tela de aviso local, e
+/// a navegação fica presa à origem do painel.
+#[derive(Default)]
+struct Guard {
+    notice: bool,
+    origin: Option<String>,
+}
+
+fn build_webview(window: &Window, target: &Target, proxy: EventLoopProxy<UserEvent>, guard: Arc<Mutex<Guard>>) -> wry::Result<WebView> {
     let ipc_proxy = proxy.clone();
     let done_proxy = proxy;
+    let ipc_guard = guard.clone();
+    let nav_guard = guard.clone();
+    let dl_guard = guard;
     let mut builder = WebViewBuilder::new()
         .with_ipc_handler(move |req| {
-            let _ = ipc_proxy.send_event(UserEvent::Ipc(req.body().clone()));
+            // só a tela de aviso (HTML local, não http) pode pedir ações
+            let from_web = req.uri().scheme_str().is_some_and(|s| s.starts_with("http"));
+            if ipc_guard.lock().unwrap().notice && !from_web {
+                let _ = ipc_proxy.send_event(UserEvent::Ipc(req.body().clone()));
+            } else {
+                tracing::warn!(uri = %req.uri(), "pedido interno ignorado (fora da tela de aviso)");
+            }
         })
-        // exportar CSV etc.: salva direto na pasta Downloads
-        .with_download_started_handler(|_url, path| {
-            let name = path.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "download".into());
-            *path = downloads_dir().join(name);
+        .with_navigation_handler(move |url| {
+            if url.starts_with("about:") || url.starts_with("data:") {
+                return true;
+            }
+            let g = nav_guard.lock().unwrap();
+            let ok = g.origin.as_deref().is_some_and(|o| origin_of(&url).as_deref() == Some(o));
+            if !ok {
+                tracing::warn!(%url, "navegação bloqueada: fora do painel");
+            }
+            ok
+        })
+        // exportar CSV etc.: salva na pasta Downloads, só se vier do painel
+        .with_download_started_handler(move |url, path| {
+            let g = dl_guard.lock().unwrap();
+            if g.origin.as_deref().is_none_or(|o| origin_of(&url).as_deref() != Some(o)) {
+                return false;
+            }
+            *path = download_target(path);
             true
         })
         .with_download_completed_handler(move |_url, path, ok| {
@@ -434,8 +513,15 @@ fn main() {
         .with_window_icon(window_icon())
         .build(&event_loop)
         .expect("não consegui abrir a janela");
-    let webview = build_webview(&window, &target, proxy.clone()).expect("não consegui criar o WebView");
-    let offline_url = match &target {
+    let guard = Arc::new(Mutex::new(Guard {
+        notice: !matches!(target, Target::Url(_)),
+        origin: match &target {
+            Target::Url(u) | Target::Offline(u) => origin_of(u),
+            _ => None,
+        },
+    }));
+    let webview = build_webview(&window, &target, proxy.clone(), guard.clone()).expect("não consegui criar o WebView");
+    let mut offline_url = match &target {
         Target::Offline(url) => Some(url.clone()),
         _ => None,
     };
@@ -443,7 +529,7 @@ fn main() {
         Target::Failed { config, .. } | Target::MissingIni { config, .. } => Some(config.clone()),
         _ => None,
     };
-    let missing_ini = match &target {
+    let mut missing_ini = match &target {
         Target::MissingIni { ini, .. } => Some(ini.clone()),
         _ => None,
     };
@@ -487,6 +573,8 @@ fn main() {
                 _ => {}
             },
             Event::UserEvent(UserEvent::Reachable(url, true)) => {
+                *guard.lock().unwrap() = Guard { notice: false, origin: origin_of(&url) };
+                offline_url = None;
                 let _ = webview.load_url(&url);
             }
             Event::UserEvent(UserEvent::Reachable(_, false)) => {
@@ -496,6 +584,8 @@ fn main() {
                 ));
             }
             Event::UserEvent(UserEvent::Embedded(Ok(url))) => {
+                *guard.lock().unwrap() = Guard { notice: false, origin: origin_of(&url) };
+                missing_ini = None;
                 let _ = webview.load_url(&url);
             }
             Event::UserEvent(UserEvent::Embedded(Err(e))) => {

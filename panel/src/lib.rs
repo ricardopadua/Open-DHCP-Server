@@ -48,6 +48,20 @@ impl std::fmt::Display for MissingIni {
 
 impl std::error::Error for MissingIni {}
 
+/// Se o `panel.toml` ainda tiver a senha de fábrica ("admin"), troca por uma senha aleatória
+/// que ninguém conhece (o aplicativo entra pelo link de uso único). Devolve se trocou.
+pub fn replace_default_password(path: &std::path::Path) -> anyhow::Result<bool> {
+    let text = std::fs::read_to_string(path)?;
+    let cfg: config::Config = toml::from_str(&text)?;
+    if !auth::verify_password(web::DEFAULT_PASSWORD, &cfg.auth.password_hash) {
+        return Ok(false);
+    }
+    let hash = auth::hash_password(&auth::random_token())?;
+    let text = config::set_auth(&text, &cfg.auth.username, &hash)?;
+    fsutil::write_atomic(path, text.as_bytes())?;
+    Ok(true)
+}
+
 /// Cria o `.ini` com a configuração padrão (e a pasta dele).
 pub fn create_default_ini(path: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -60,12 +74,18 @@ pub fn create_default_ini(path: &std::path::Path) -> std::io::Result<()> {
 pub struct Server {
     listener: tokio::net::TcpListener,
     app: axum::Router,
+    shared: web::SharedApp,
 }
 
 impl Server {
     /// Endereço em que o painel está ouvindo (útil com `listen = "127.0.0.1:0"`).
     pub fn local_addr(&self) -> SocketAddr {
         self.listener.local_addr().expect("endereço do listener")
+    }
+
+    /// Link de login de uso único (válido por 2 min), para o aplicativo entrar sem senha.
+    pub fn login_link(&self) -> String {
+        self.shared.login_link()
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -101,8 +121,8 @@ pub async fn start(path: PathBuf) -> anyhow::Result<Server> {
     };
     let monitor = monitor::Monitor::new(cfg.clone(), history);
     tokio::spawn(monitor.clone().run());
-    let app = web::router(cfg, monitor, path);
+    let (app, shared) = web::router(cfg, monitor, path);
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("não consegui abrir {listen}"))?;
     tracing::info!("painel em http://{}", listener.local_addr()?);
-    Ok(Server { listener, app })
+    Ok(Server { listener, app, shared })
 }

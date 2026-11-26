@@ -37,6 +37,8 @@ using namespace std;
 #include <errno.h>
 #include <memory.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <syslog.h>
 #include "opendhcpd.h"
@@ -55,6 +57,61 @@ bool kRunning = true;
 dhcpMap dhcpCache;
 char tempbuff[512] = "";
 char logBuff[256] = "";
+
+// ---------- segurança (fork): limites e utilitários ----------
+// Tamanho do espaço de nome de host dentro de cada entrada (reservado em createCache).
+#define HOSTNAME_SIZE 65
+// Tempo que um IP recusado por DHCPDECLINE fica bloqueado (antes era para sempre).
+#define DECLINE_LOCK_SECS 3600
+
+// Nome de host vindo da rede ou de arquivos: só letras, números, '-' e '_', parando no primeiro
+// '.', no máximo 63 caracteres. Evita injeção em logs (quebras de linha), HTML na página de
+// status e nomes maiores que o espaço reservado.
+static void sanitizeHostname(char *h)
+{
+	char *w = h;
+	int n = 0;
+	for (char *r = h; *r && *r != '.' && n < 63; r++)
+	{
+		unsigned char c = (unsigned char)*r;
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+		{
+			*w++ = (char)c;
+			n++;
+		}
+	}
+	*w = 0;
+}
+
+// Copia o nome para o espaço fixo da entrada (nunca troca o ponteiro nem passa do limite).
+static void setHostname(data7 *e, const char *h)
+{
+	if (e && e->hostname)
+		snprintf(e->hostname, HOSTNAME_SIZE, "%s", h ? h : "");
+}
+
+// fopen que não segue links simbólicos e cria arquivos sem permissão de escrita para outros.
+static FILE *safeOpen(const char *path, const char *mode)
+{
+	int flags = O_NOFOLLOW;
+	if (!strcmp(mode, "rb") || !strcmp(mode, "rt"))
+		flags |= O_RDONLY;
+	else if (!strcmp(mode, "rb+"))
+		flags |= O_RDWR;
+	else if (!strcmp(mode, "ab") || !strcmp(mode, "at"))
+		flags |= O_WRONLY | O_APPEND | O_CREAT;
+	else if (!strcmp(mode, "wb"))
+		flags |= O_WRONLY | O_CREAT | O_TRUNC;
+	else
+		return NULL;
+	int fd = open(path, flags, 0644);
+	if (fd < 0)
+		return NULL;
+	FILE *f = fdopen(fd, mode);
+	if (!f)
+		close(fd);
+	return f;
+}
 char extbuff[256] = "";
 bool verbatim = false;
 char iniFile[256] = "";
@@ -233,7 +290,7 @@ int main(int argc, char **argv)
 		{
 			if (atoi(tempbuff) != getpid())
 			{
-				sprintf(logBuff, "Error: %s is already running, Pid = %s", ds, tempbuff);
+				snprintf(logBuff, sizeof(logBuff), "Error: %s is already running, Pid = %s", ds, tempbuff);
 				break;
 			}
 		}
@@ -266,11 +323,15 @@ int main(int argc, char **argv)
         else if (!strncasecmp(argv[i], "-s", 2))
             myTrim(leaFile, argv[i] + 2);
         else
-            sprintf(logBuff, "Error: Invalid Argument %s", argv[i]);
+            snprintf(logBuff, sizeof(logBuff), "Error: Invalid Argument %s", argv[i]);
     }
 
     if (!leaFile[0])
-        strcpy(leaFile, "/tmp/opendhcp.state");
+    {
+        // padrão fora do /tmp (lá outro usuário poderia plantar um link ou um estado falso)
+        mkdir("/var/lib/opendhcp", 0700);
+        strcpy(leaFile, "/var/lib/opendhcp/opendhcp.state");
+    }
 
     if (!iniFile[0])
         strcpy(iniFile, "/etc/opendhcp.ini");
@@ -357,7 +418,7 @@ int main(int argc, char **argv)
 
 						if (errno || req->sock == INVALID_SOCKET)
 						{
-							sprintf(logBuff, "Accept Failed, Error: %s", strerror(errno));
+							snprintf(logBuff, sizeof(logBuff), "Accept Failed, Error: %s", strerror(errno));
 							logDHCPMess(logBuff, 1);
 							free(req);
 						}
@@ -366,7 +427,7 @@ int main(int argc, char **argv)
 					}
 					else
 					{
-						sprintf(logBuff, "Memory Error");
+						snprintf(logBuff, sizeof(logBuff), "Memory Error");
 						logDHCPMess(logBuff, 0);
 					}
 				}
@@ -432,7 +493,7 @@ int main(int argc, char **argv)
         }
 
         /* Change the file mode mask */
-        umask(0);
+        umask(022); // arquivos de estado e log sem escrita para outros usuários
 
         /* Open any logs here */
 
@@ -518,7 +579,7 @@ int main(int argc, char **argv)
 
 						if (errno || req->sock == INVALID_SOCKET)
 						{
-							sprintf(logBuff, "Accept Failed, Error: %s", strerror(errno));
+							snprintf(logBuff, sizeof(logBuff), "Accept Failed, Error: %s", strerror(errno));
 							logDHCPMess(logBuff, 1);
 							free(req);
 						}
@@ -527,7 +588,7 @@ int main(int argc, char **argv)
 					}
 					else
 					{
-						sprintf(logBuff, "Memory Error");
+						snprintf(logBuff, sizeof(logBuff), "Memory Error");
 						logDHCPMess(logBuff, 0);
 					}
 				}
@@ -591,7 +652,7 @@ void catch_int(int sig_num)
     {
 		network.ready = false;
 		kRunning = false;
-		sprintf(logBuff, "Closing Network Connections...");
+		snprintf(logBuff, sizeof(logBuff), "Closing Network Connections...");
 		logDHCPMess(logBuff, 1);
 		sleep(1);
 
@@ -602,7 +663,7 @@ void catch_int(int sig_num)
 
 		close(cfig.fixedSocket);
 
-		sprintf(logBuff, "Open DHCP Server Stopped !\n");
+		snprintf(logBuff, sizeof(logBuff), "Open DHCP Server Stopped !\n");
 		logDHCPMess(logBuff, 1);
 		sleep(1);
 
@@ -647,6 +708,20 @@ void procHTTP(data19 *req)
 {
 	//debug("procHTTP");
 
+	// lista de clientes permitidos antes de qualquer espera: um IP fora da lista não prende o
+	// laço principal (que também atende o DHCP)
+	if (cfig.httpClients[0] && !findServer(cfig.httpClients, 8, req->remote.sin_addr.s_addr))
+	{
+		if (verbatim || cfig.dhcpLogLevel >= 2)
+		{
+			snprintf(logBuff, sizeof(logBuff), "Client %s, HTTP Access Denied", IP2String(tempbuff, req->remote.sin_addr.s_addr));
+			logDHCPMess(logBuff, 2);
+		}
+		closesocket(req->sock);
+		free(req);
+		return;
+	}
+
 	req->ling.l_onoff = 1; //0 = off (l_linger ignored), nonzero = on
 	req->ling.l_linger = 30; //0 = discard data, nonzero = wait for data sent
 	setsockopt(req->sock, SOL_SOCKET, SO_LINGER, (const char*)&req->ling, sizeof(req->ling));
@@ -660,7 +735,7 @@ void procHTTP(data19 *req)
 
 	if (!select((req->sock + 1), &readfds1, NULL, NULL, &tv1))
 	{
-		sprintf(logBuff, "Client %s, HTTP Message Receive failed", IP2String(tempbuff, req->remote.sin_addr.s_addr));
+		snprintf(logBuff, sizeof(logBuff), "Client %s, HTTP Message Receive failed", IP2String(tempbuff, req->remote.sin_addr.s_addr));
 		logDHCPMess(logBuff, 1);
 		closesocket(req->sock);
 		free(req);
@@ -669,12 +744,12 @@ void procHTTP(data19 *req)
 
 	errno = 0;
 	char buffer[1024];
-	req->bytes = recv(req->sock, buffer, sizeof(buffer), 0);
+	req->bytes = recv(req->sock, buffer, sizeof(buffer) - 1, 0);
 	//errno = WSAGetLastError();
 
 	if (errno || req->bytes <= 0)
 	{
-		sprintf(logBuff, "Client %s, HTTP Message Receive failed, Error %s", IP2String(tempbuff, req->remote.sin_addr.s_addr), strerror(errno));
+		snprintf(logBuff, sizeof(logBuff), "Client %s, HTTP Message Receive failed, Error %s", IP2String(tempbuff, req->remote.sin_addr.s_addr), strerror(errno));
 		logDHCPMess(logBuff, 1);
 		closesocket(req->sock);
 		free(req);
@@ -682,7 +757,7 @@ void procHTTP(data19 *req)
 	}
 	else if (verbatim || cfig.dhcpLogLevel >= 2)
 	{
-		sprintf(logBuff, "Client %s, HTTP Request Received", IP2String(tempbuff, req->remote.sin_addr.s_addr));
+		snprintf(logBuff, sizeof(logBuff), "Client %s, HTTP Request Received", IP2String(tempbuff, req->remote.sin_addr.s_addr));
 		logDHCPMess(logBuff, 2);
 		//printf("%s\n", buffer);
 	}
@@ -691,7 +766,7 @@ void procHTTP(data19 *req)
 	{
 		if (verbatim || cfig.dhcpLogLevel >= 2)
 		{
-			sprintf(logBuff, "Client %s, HTTP Access Denied", IP2String(tempbuff, req->remote.sin_addr.s_addr));
+			snprintf(logBuff, sizeof(logBuff), "Client %s, HTTP Access Denied", IP2String(tempbuff, req->remote.sin_addr.s_addr));
 			logDHCPMess(logBuff, 2);
 		}
 
@@ -707,7 +782,7 @@ void procHTTP(data19 *req)
 		return;
 	}
 
-	buffer[sizeof(buffer) - 1] = 0;
+	buffer[req->bytes] = 0;
 	char *fp = NULL;
 	char *end = strchr(buffer, '\n');
 
@@ -727,12 +802,12 @@ void procHTTP(data19 *req)
 	{
 		if (fp && (verbatim || cfig.dhcpLogLevel >= 2))
 		{
-			sprintf(logBuff, "Client %s, %s not found", IP2String(tempbuff, req->remote.sin_addr.s_addr), fp);
+			snprintf(logBuff, sizeof(logBuff), "Client %s, %s not found", IP2String(tempbuff, req->remote.sin_addr.s_addr), fp);
 			logDHCPMess(logBuff, 2);
 		}
 		else if (verbatim || cfig.dhcpLogLevel >= 2)
 		{
-			sprintf(logBuff, "Client %s, Invalid http request", IP2String(tempbuff, req->remote.sin_addr.s_addr));
+			snprintf(logBuff, sizeof(logBuff), "Client %s, Invalid http request", IP2String(tempbuff, req->remote.sin_addr.s_addr));
 			logDHCPMess(logBuff, 2);
 		}
 
@@ -763,7 +838,7 @@ void sendStatus(data19 *req)
 
 	if (!req->dp)
 	{
-		sprintf(logBuff, "Memory Error");
+		snprintf(logBuff, sizeof(logBuff), "Memory Error");
 		logDHCPMess(logBuff, 1);
 		closesocket(req->sock);
 		free(req);
@@ -771,7 +846,8 @@ void sendStatus(data19 *req)
 	}
 
 	char *fp = req->dp;
-	char *maxData = req->dp + (req->memSize - 512);
+	// folga para o fim fixo da página (~540 bytes) e uma linha de lease inteira
+	char *maxData = req->dp + (req->memSize - 1024);
 	tm *ttm = gmtime(&t);
 	strftime(tempbuff, sizeof(tempbuff), "%a, %d %b %Y %H:%M:%S GMT", ttm);
 	fp += sprintf(fp, send200, tempbuff, tempbuff);
@@ -926,7 +1002,7 @@ void sendStatus(data19 *req)
 		fp += sprintf(fp, "</tr>\n");
 
 	fp += sprintf(fp, "</table>\n</body>\n</html>");
-	MYBYTE x = sprintf(tempbuff, "%u", (fp - contentStart));
+	MYBYTE x = sprintf(tempbuff, "%u", (unsigned)(fp - contentStart));
 	memcpy((contentStart - 12), tempbuff, x);
 	req->bytes = fp - req->dp;
 
@@ -950,7 +1026,7 @@ void sendScopeStatus(data19 *req)
 
 	if (!req->dp)
 	{
-		sprintf(logBuff, "Memory Error");
+		snprintf(logBuff, sizeof(logBuff), "Memory Error");
 		logDHCPMess(logBuff, 1);
 		closesocket(req->sock);
 		free(req);
@@ -958,7 +1034,8 @@ void sendScopeStatus(data19 *req)
 	}
 
 	char *fp = req->dp;
-	char *maxData = req->dp + (req->memSize - 512);
+	// folga para o fim fixo da página (~540 bytes) e uma linha de lease inteira
+	char *maxData = req->dp + (req->memSize - 1024);
 	tm *ttm = gmtime(&t);
 	strftime(tempbuff, sizeof(tempbuff), "%a, %d %b %Y %H:%M:%S GMT", ttm);
 	fp += sprintf(fp, send200, tempbuff, tempbuff);
@@ -1002,7 +1079,7 @@ void *sendHTTP(void *lpParam)
 {
 	data19 *req = (data19*)lpParam;
 
-	//sprintf(logBuff, "sendHTTP memsize=%d bytes=%d", req->memSize, req->bytes);
+	//snprintf(logBuff, sizeof(logBuff), "sendHTTP memsize=%d bytes=%d", req->memSize, req->bytes);
 	//debug(logBuff);
 
 	char *dp = req->dp;
@@ -1090,7 +1167,7 @@ MYDWORD resad(data9 *req)
 		{
 			if (verbatim || cfig.dhcpLogLevel)
 			{
-				sprintf(logBuff, "Static DHCP Host %s (%s) has No IP, DHCPDISCOVER ignored", req->chaddr, req->hostname);
+				snprintf(logBuff, sizeof(logBuff), "Static DHCP Host %s (%s) has No IP, DHCPDISCOVER ignored", req->chaddr, req->hostname);
 				logDHCPMess(logBuff, 1);
 			}
 			return 0;
@@ -1320,7 +1397,7 @@ MYDWORD resad(data9 *req)
 
 			if (!req->dhcpEntry)
 			{
-				sprintf(logBuff, "Memory Allocation Error");
+				snprintf(logBuff, sizeof(logBuff), "Memory Allocation Error");
 				logDHCPMess(logBuff, 1);
 				return 0;
 			}
@@ -1329,7 +1406,7 @@ MYDWORD resad(data9 *req)
 
 			if (!req->dhcpEntry->mapname)
 			{
-				sprintf(logBuff, "Memory Allocation Error");
+				snprintf(logBuff, sizeof(logBuff), "Memory Allocation Error");
 				logDHCPMess(logBuff, 1);
 				return 0;
 			}
@@ -1349,16 +1426,16 @@ MYDWORD resad(data9 *req)
 		if (rangeFound)
 		{
 			if (req->dhcpp.header.bp_giaddr)
-				sprintf(logBuff, "No free leases for DHCPDISCOVER for %s (%s) from RelayAgent %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
+				snprintf(logBuff, sizeof(logBuff), "No free leases for DHCPDISCOVER for %s (%s) from RelayAgent %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
 			else
-				sprintf(logBuff, "No free leases for DHCPDISCOVER for %s (%s) from interface %s", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
+				snprintf(logBuff, sizeof(logBuff), "No free leases for DHCPDISCOVER for %s (%s) from interface %s", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
 		}
 		else
 		{
 			if (req->dhcpp.header.bp_giaddr)
-				sprintf(logBuff, "No Matching DHCP Range for DHCPDISCOVER for %s (%s) from RelayAgent %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
+				snprintf(logBuff, sizeof(logBuff), "No Matching DHCP Range for DHCPDISCOVER for %s (%s) from RelayAgent %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
 			else
-				sprintf(logBuff, "No Matching DHCP Range for DHCPDISCOVER for %s (%s) from interface %s", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
+				snprintf(logBuff, sizeof(logBuff), "No Matching DHCP Range for DHCPDISCOVER for %s (%s) from interface %s", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
 		}
 		logDHCPMess(logBuff, 1);
 	}
@@ -1378,7 +1455,7 @@ MYDWORD chad(data9 *req)
 
 MYDWORD sdmess(data9 *req)
 {
-	//sprintf(logBuff, "sdmess, Request Type = %u",req->req_type);
+	//snprintf(logBuff, sizeof(logBuff), "sdmess, Request Type = %u",req->req_type);
 	//debug(logBuff);
 
 	if (req->req_type == DHCP_MESS_NONE)
@@ -1389,7 +1466,7 @@ MYDWORD sdmess(data9 *req)
 		{
 			if (verbatim || cfig.dhcpLogLevel)
 			{
-				sprintf(logBuff, "No Static Entry found for BOOTPREQUEST from Host %s", req->chaddr);
+				snprintf(logBuff, sizeof(logBuff), "No Static Entry found for BOOTPREQUEST from Host %s", req->chaddr);
 				logDHCPMess(logBuff, 1);
 			}
 
@@ -1401,15 +1478,17 @@ MYDWORD sdmess(data9 *req)
 		if (req->dhcpp.header.bp_ciaddr && chad(req) == req->dhcpp.header.bp_ciaddr)
 		{
 			lockIP(req->dhcpp.header.bp_ciaddr);
+			// bloqueio temporário: antes era para sempre, e DECLINE falsos esgotavam a faixa
+			setRangeExpiry(req->dhcpp.header.bp_ciaddr, t + DECLINE_LOCK_SECS);
 
 			req->dhcpEntry->ip = 0;
-			req->dhcpEntry->expiry = INT_MAX;
+			req->dhcpEntry->expiry = t + DECLINE_LOCK_SECS;
 			req->dhcpEntry->display = false;
 			req->dhcpEntry->local = false;
 
 			if (verbatim || cfig.dhcpLogLevel)
 			{
-				sprintf(logBuff, "IP Address %s declined by Host %s (%s), locked", IP2String(tempbuff, req->dhcpp.header.bp_ciaddr), req->chaddr, req->hostname);
+				snprintf(logBuff, sizeof(logBuff), "IP Address %s declined by Host %s (%s), locked", IP2String(tempbuff, req->dhcpp.header.bp_ciaddr), req->chaddr, req->hostname);
 				logDHCPMess(logBuff, 1);
 			}
 		}
@@ -1433,7 +1512,7 @@ MYDWORD sdmess(data9 *req)
 
 			if (verbatim || cfig.dhcpLogLevel)
 			{
-				sprintf(logBuff, "IP Address %s released by Host %s (%s)", IP2String(tempbuff, req->dhcpp.header.bp_ciaddr), req->chaddr, req->hostname);
+				snprintf(logBuff, sizeof(logBuff), "IP Address %s released by Host %s (%s)", IP2String(tempbuff, req->dhcpp.header.bp_ciaddr), req->chaddr, req->hostname);
 				logDHCPMess(logBuff, 1);
 			}
 		}
@@ -1485,7 +1564,7 @@ MYDWORD sdmess(data9 *req)
 
 					if (verbatim || cfig.dhcpLogLevel)
 					{
-						sprintf(logBuff, "DHCPREQUEST from Host %s (%s) without Discover, NAKed", req->chaddr, req->hostname);
+						snprintf(logBuff, sizeof(logBuff), "DHCPREQUEST from Host %s (%s) without Discover, NAKed", req->chaddr, req->hostname);
 						logDHCPMess(logBuff, 1);
 					}
 				}
@@ -1510,7 +1589,7 @@ MYDWORD sdmess(data9 *req)
 
 			if (verbatim || cfig.dhcpLogLevel)
 			{
-				sprintf(logBuff, "DHCPREQUEST from Host %s (%s) without Discover, NAKed", req->chaddr, req->hostname);
+				snprintf(logBuff, sizeof(logBuff), "DHCPREQUEST from Host %s (%s) without Discover, NAKed", req->chaddr, req->hostname);
 				logDHCPMess(logBuff, 1);
 			}
 		}
@@ -1522,7 +1601,7 @@ MYDWORD sdmess(data9 *req)
 	int packSize = req->vp - (MYBYTE*)&req->dhcpp;
 	packSize++;
 
-	if (req->req_type == DHCP_MESS_NONE)
+	if (req->req_type == DHCP_MESS_NONE && req->messsize > packSize && req->messsize <= sizeof(dhcp_packet))
 		packSize = req->messsize;
 
 	if ((req->dhcpp.header.bp_giaddr || !req->remote.sin_addr.s_addr) && req->dhcpEntry && req->dhcpEntry->rangeInd >= 0)
@@ -1607,15 +1686,15 @@ MYDWORD alad(data9 *req)
 		{
 			if (req->lease && req->reqIP)
 			{
-				sprintf(logBuff, "Host %s (%s) allotted %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
+				snprintf(logBuff, sizeof(logBuff), "Host %s (%s) allotted %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
 			}
 			else if (req->req_type)
 			{
-				sprintf(logBuff, "Host %s (%s) renewed %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
+				snprintf(logBuff, sizeof(logBuff), "Host %s (%s) renewed %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
 			}
 			else
 			{
-				sprintf(logBuff, "BOOTP Host %s (%s) allotted %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr));
+				snprintf(logBuff, sizeof(logBuff), "BOOTP Host %s (%s) allotted %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr));
 			}
 			logDHCPMess(logBuff, 1);
 		}
@@ -1631,15 +1710,15 @@ MYDWORD alad(data9 *req)
 			{
 				if (req->lease && req->reqIP)
 				{
-					sprintf(logBuff, "Host %s (%s) allotted %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
+					snprintf(logBuff, sizeof(logBuff), "Host %s (%s) allotted %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
 				}
 				else if (req->req_type)
 				{
-					sprintf(logBuff, "Host %s (%s) renewed %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
+					snprintf(logBuff, sizeof(logBuff), "Host %s (%s) renewed %s for %u seconds", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr), req->lease);
 				}
 				else
 				{
-					sprintf(logBuff, "BOOTP Host %s (%s) allotted %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr));
+					snprintf(logBuff, sizeof(logBuff), "BOOTP Host %s (%s) allotted %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr));
 				}
 				logDHCPMess(logBuff, 1);
 			}
@@ -1653,7 +1732,7 @@ MYDWORD alad(data9 *req)
 	}
 	else if ((verbatim || cfig.dhcpLogLevel >= 2) && req->resp_type == DHCP_MESS_OFFER)
 	{
-		sprintf(logBuff, "Host %s (%s) offered %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr));
+		snprintf(logBuff, sizeof(logBuff), "Host %s (%s) offered %s", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_yiaddr));
 		logDHCPMess(logBuff, 2);
 	}
 	//printf("%u=out\n", req->resp_type);
@@ -1787,7 +1866,7 @@ void addOptions(data9 *req)
 			if (!req->hostname[0])
 				genHostName(req->hostname, req->dhcpp.header.bp_chaddr, req->dhcpp.header.bp_hlen);
 
-			strcpy(req->dhcpEntry->hostname, req->hostname);
+			setHostname(req->dhcpEntry, req->hostname);
 /*
 			if (!req->opAdded[DHCP_OPTION_ROUTER])
 			{
@@ -1824,7 +1903,9 @@ void pvdata(data9 *req, data3 *op)
 {
 	//debug("pvdata");
 
-	if (!req->opAdded[op->opt_code] && ((req->vp - (MYBYTE*)&req->dhcpp) + op->size < req->messsize))
+	MYWORD limit = req->messsize < sizeof(dhcp_packet) ? req->messsize : sizeof(dhcp_packet);
+
+	if (!req->opAdded[op->opt_code] && ((req->vp - (MYBYTE*)&req->dhcpp) + op->size + 3 <= limit))
 	{
 		if (op->opt_code == DHCP_OPTION_NEXTSERVER)
 			req->dhcpp.header.bp_siaddr = fIP(op->value);
@@ -1851,12 +1932,9 @@ void pvdata(data9 *req, data3 *op)
 			{
 				memcpy(req->hostname, op->value, op->size);
 				req->hostname[op->size] = 0;
-				req->hostname[64] = 0;
-
-				if (char *ptr = strchr(req->hostname, '.'))
-					*ptr = 0;
-
+				sanitizeHostname(req->hostname);
 				op->size = strlen(req->hostname);
+				memcpy(op->value, req->hostname, op->size);
 			}
 
 			MYWORD tsize = op->size + 2;
@@ -1925,6 +2003,21 @@ void setLeaseExpiry(data7 *dhcpEntry)
 	}
 }
 
+// Prazo do IP na tabela da faixa (usado para liberar um bloqueio depois de um tempo).
+void setRangeExpiry(MYDWORD ip, time_t expiry)
+{
+	MYDWORD iip = htonl(ip);
+
+	for (char rangeInd = 0; rangeInd < cfig.rangeCount; rangeInd++)
+	{
+		if (iip >= cfig.dhcpRanges[rangeInd].rangeStart && iip <= cfig.dhcpRanges[rangeInd].rangeEnd)
+		{
+			cfig.dhcpRanges[rangeInd].expiry[iip - cfig.dhcpRanges[rangeInd].rangeStart] = expiry;
+			return;
+		}
+	}
+}
+
 void lockIP(MYDWORD ip)
 {
 	MYDWORD iip = htonl(ip);
@@ -1984,7 +2077,7 @@ void *sendToken(void *lpParam)
 //
 //		if (!errno && verbatim || cfig.dhcpLogLevel >= 2)
 //		{
-//			sprintf(logBuff, "Token Sent");
+//			snprintf(logBuff, sizeof(logBuff), "Token Sent");
 //			logDHCPMess(logBuff, 2);
 //		}
 
@@ -2055,9 +2148,9 @@ MYDWORD sendRepl(data9 *req)
 		if (verbatim || cfig.dhcpLogLevel >= 1)
 		{
 			if (cfig.replication == 1)
-				sprintf(logBuff, "Error %s Sending DHCP Update to Secondary Server", strerror(errno));
+				snprintf(logBuff, sizeof(logBuff), "Error %s Sending DHCP Update to Secondary Server", strerror(errno));
 			else
-				sprintf(logBuff, "Error %s Sending DHCP Update to Primary Server", strerror(errno));
+				snprintf(logBuff, sizeof(logBuff), "Error %s Sending DHCP Update to Primary Server", strerror(errno));
 
 			logDHCPMess(logBuff, 1);
 		}
@@ -2067,9 +2160,9 @@ MYDWORD sendRepl(data9 *req)
 	else if (verbatim || cfig.dhcpLogLevel >= 2)
 	{
 		if (cfig.replication == 1)
-			sprintf(logBuff, "DHCP Update for host %s (%s) sent to Secondary Server", req->dhcpEntry->mapname, IP2String(tempbuff, req->dhcpEntry->ip));
+			snprintf(logBuff, sizeof(logBuff), "DHCP Update for host %s (%s) sent to Secondary Server", req->dhcpEntry->mapname, IP2String(tempbuff, req->dhcpEntry->ip));
 		else
-			sprintf(logBuff, "DHCP Update for host %s (%s) sent to Primary Server", req->dhcpEntry->mapname, IP2String(tempbuff, req->dhcpEntry->ip));
+			snprintf(logBuff, sizeof(logBuff), "DHCP Update for host %s (%s) sent to Primary Server", req->dhcpEntry->mapname, IP2String(tempbuff, req->dhcpEntry->ip));
 
 		logDHCPMess(logBuff, 2);
 	}
@@ -2096,7 +2189,7 @@ MYDWORD sendRepl(data7 *dhcpEntry)
 	req.dhcpp.header.bp_magic_num[1] = 130;
 	req.dhcpp.header.bp_magic_num[2] = 83;
 	req.dhcpp.header.bp_magic_num[3] = 99;
-	strcpy(req.hostname, dhcpEntry->hostname);
+	snprintf(req.hostname, sizeof(req.hostname), "%s", dhcpEntry->hostname ? dhcpEntry->hostname : "");
 
 	return sendRepl(&req);
 }
@@ -2112,7 +2205,7 @@ void recvRepl(data9 *req)
 	{
 //		if (verbatim || cfig.dhcpLogLevel >= 2)
 //		{
-//			sprintf(logBuff, "Token Received");
+//			snprintf(logBuff, sizeof(logBuff), "Token Received");
 //			logDHCPMess(logBuff, 2);
 //		}
 
@@ -2131,7 +2224,7 @@ void recvRepl(data9 *req)
 //
 //			if (!errno && (verbatim || cfig.dhcpLogLevel >= 2))
 //			{
-//				sprintf(logBuff, "Token Responded");
+//				snprintf(logBuff, sizeof(logBuff), "Token Responded");
 //				logDHCPMess(logBuff, 2);
 //			}
 		}
@@ -2156,9 +2249,9 @@ void recvRepl(data9 *req)
 		if (req->dhcpEntry->fixed)
 		{
 			if (cfig.replication == 1)
-				sprintf(logBuff, "DHCP Update ignored for %s (%s) from Secondary Server", req->chaddr, IP2String(tempbuff, ip));
+				snprintf(logBuff, sizeof(logBuff), "DHCP Update ignored for %s (%s) from Secondary Server", req->chaddr, IP2String(tempbuff, ip));
 			else
-				sprintf(logBuff, "DHCP Update ignored for %s (%s) from Primary Server", req->chaddr, IP2String(tempbuff, ip));
+				snprintf(logBuff, sizeof(logBuff), "DHCP Update ignored for %s (%s) from Primary Server", req->chaddr, IP2String(tempbuff, ip));
 
 			logDHCPMess(logBuff, 1);
 			return;
@@ -2186,7 +2279,7 @@ void recvRepl(data9 *req)
 
 		if (!req->dhcpEntry)
 		{
-			sprintf(logBuff, "Memory Allocation Error");
+			snprintf(logBuff, sizeof(logBuff), "Memory Allocation Error");
 			logDHCPMess(logBuff, 1);
 			return;
 		}
@@ -2195,7 +2288,7 @@ void recvRepl(data9 *req)
 
 		if (!req->dhcpEntry->mapname)
 		{
-			sprintf(logBuff, "Memory Allocation Error");
+			snprintf(logBuff, sizeof(logBuff), "Memory Allocation Error");
 			free(req->dhcpEntry);
 			logDHCPMess(logBuff, 1);
 			return;
@@ -2212,20 +2305,22 @@ void recvRepl(data9 *req)
 
 		MYDWORD hangTime = req->lease;
 
+		// replicação não autentica o parceiro: não aceita prazos maiores que o configurado
+		// (um pacote falso podia travar IPs "para sempre")
+		MYDWORD maxLease = cfig.lease > 2592000 ? cfig.lease : 2592000;
+		if (cfig.lease < INT_MAX && hangTime > maxLease)
+			hangTime = maxLease;
+
 		if (req->rebind > req->lease)
 			hangTime = req->rebind;
 
 		setLeaseExpiry(req->dhcpEntry, hangTime);
 
+		// o nome mora no espaço fixo da entrada (createCache): copiar com limite, nunca free
 		if (req->hostname[0])
 		{
-			if (req->dhcpEntry->hostname && strcasecmp(req->dhcpEntry->hostname, req->hostname))
-			{
-				free (req->dhcpEntry->hostname);
-				req->dhcpEntry->hostname = cloneString(req->hostname);
-			}
-			else if (!req->dhcpEntry->hostname)
-				req->dhcpEntry->hostname = cloneString(req->hostname);
+			sanitizeHostname(req->hostname);
+			setHostname(req->dhcpEntry, req->hostname);
 		}
 
 		pthread_t threadId;
@@ -2238,9 +2333,9 @@ void recvRepl(data9 *req)
 	else
 	{
 		if (cfig.replication == 1)
-			sprintf(logBuff, "DHCP Update ignored for %s (%s) from Secondary Server", req->chaddr, IP2String(tempbuff, ip));
+			snprintf(logBuff, sizeof(logBuff), "DHCP Update ignored for %s (%s) from Secondary Server", req->chaddr, IP2String(tempbuff, ip));
 		else
-			sprintf(logBuff, "DHCP Update ignored for %s (%s) from Primary Server", req->chaddr, IP2String(tempbuff, ip));
+			snprintf(logBuff, sizeof(logBuff), "DHCP Update ignored for %s (%s) from Primary Server", req->chaddr, IP2String(tempbuff, ip));
 
 		logDHCPMess(logBuff, 1);
 		return;
@@ -2249,9 +2344,9 @@ void recvRepl(data9 *req)
 	if (verbatim || cfig.dhcpLogLevel >= 2)
 	{
 		if (cfig.replication == 1)
-			sprintf(logBuff, "DHCP Update received for %s (%s) from Secondary Server", req->chaddr, IP2String(tempbuff, ip));
+			snprintf(logBuff, sizeof(logBuff), "DHCP Update received for %s (%s) from Secondary Server", req->chaddr, IP2String(tempbuff, ip));
 		else
-			sprintf(logBuff, "DHCP Update received for %s (%s) from Primary Server", req->chaddr, IP2String(tempbuff, ip));
+			snprintf(logBuff, sizeof(logBuff), "DHCP Update received for %s (%s) from Primary Server", req->chaddr, IP2String(tempbuff, ip));
 
 		logDHCPMess(logBuff, 2);
 	}
@@ -2314,7 +2409,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 
 		if (!name[0])
 		{
-			sprintf(logBuff, "Warning: section [%s] invalid option %s ignored", sectionName, raw);
+			snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] invalid option %s ignored", sectionName, raw);
 			logDHCPMess(logBuff, 1);
 			continue;
 		}
@@ -2325,7 +2420,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				addDHCPRange(value);
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2334,12 +2429,12 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 		{
 			if (!strcasecmp(sectionName, GLOBALOPTIONS) || !strcasecmp(sectionName, RANGESET))
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			else if (!isIP(value) && strcasecmp(value, "0.0.0.0"))
 			{
-				sprintf(logBuff, "Warning: section [%s] option Invalid IP Addr %s option ignored", sectionName, value);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option Invalid IP Addr %s option ignored", sectionName, value);
 				logDHCPMess(logBuff, 1);
 			}
 			else
@@ -2353,7 +2448,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				addMacRange(optionData->rangeSetInd, value);
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2372,7 +2467,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				valSize = strlen(value);
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s value too big, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s value too big, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 				continue;
 			}
@@ -2406,7 +2501,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 
 			if (numbytes > 255)
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s, too many bytes, entry ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, too many bytes, entry ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 				continue;
 			}
@@ -2445,7 +2540,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 			}
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s value too long, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s value too long, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 				continue;
 			}
@@ -2457,7 +2552,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				addVendClass(optionData->rangeSetInd, value, valSize);
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2468,7 +2563,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				addUserClass(optionData->rangeSetInd, value, valSize);
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2477,7 +2572,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 		{
 			if (valSize != 4)
 			{
-				sprintf(logBuff, "Warning: section [%s] invalid value %s, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] invalid value %s, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			else if (!strcasecmp(sectionName, RANGESET))
@@ -2487,7 +2582,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 			}
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2496,7 +2591,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 		{
 			if (valSize != 4)
 			{
-				sprintf(logBuff, "Warning: section [%s] invalid value %s, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] invalid value %s, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			else if (!strcasecmp(sectionName, RANGESET))
@@ -2506,7 +2601,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 			}
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, option ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2518,7 +2613,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 		{
 			if (atoi(name) < 1 || atoi(name) >= 254)
 			{
-				sprintf(logBuff, "Warning: section [%s] invalid option %s, ignored", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] invalid option %s, ignored", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 				continue;
 			}
@@ -2538,7 +2633,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 
 		if (!opTag)
 		{
-			sprintf(logBuff, "Warning: section [%s] invalid option %s, ignored", sectionName, raw);
+			snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] invalid option %s, ignored", sectionName, raw);
 			logDHCPMess(logBuff, 1);
 			continue;
 		}
@@ -2546,12 +2641,12 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 		if (!opType)
 			opType = valType;
 
-		//sprintf(logBuff, "Tag %i ValType %i opType %i value=%s size=%u", opTag, valType, opType, value, valSize);
+		//snprintf(logBuff, sizeof(logBuff), "Tag %i ValType %i opType %i value=%s size=%u", opTag, valType, opType, value, valSize);
 		//logDHCPMess(logBuff, 1);
 
 		if (op_specified[opTag])
 		{
-			sprintf(logBuff, "Warning: section [%s] duplicate option %s, ignored", sectionName, raw);
+			snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] duplicate option %s, ignored", sectionName, raw);
 			logDHCPMess(logBuff, 1);
 			continue;
 		}
@@ -2572,7 +2667,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 			}
 			else
 			{
-				sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 				logDHCPMess(logBuff, 1);
 			}
 			continue;
@@ -2587,12 +2682,12 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 
 				if (valType != 1 && valType != 2)
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, need string value, option ignored", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, need string value, option ignored", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 //				else if (opTag == DHCP_OPTION_DOMAINNAME)
 //				{
-//					sprintf(logBuff, "Warning: section [%s] option %u should be under [DOMAIN_NAME], ignored", sectionName, opTag);
+//					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %u should be under [DOMAIN_NAME], ignored", sectionName, opTag);
 //					logDHCPMess(logBuff, 1);
 //					continue;
 //				}
@@ -2608,7 +2703,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2621,13 +2716,13 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				{
 					if (opType == 3 && valSize % 4)
 					{
-						sprintf(logBuff, "Warning: section [%s] option %s, missing/extra bytes/octates in IP, option ignored", sectionName, raw);
+						snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, missing/extra bytes/octates in IP, option ignored", sectionName, raw);
 						logDHCPMess(logBuff, 1);
 						continue;
 					}
 					else if (opType == 8 && valSize % 8)
 					{
-						sprintf(logBuff, "Warning: section [%s] option %s, some values not in IP/Mask form, option ignored", sectionName, raw);
+						snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, some values not in IP/Mask form, option ignored", sectionName, raw);
 						logDHCPMess(logBuff, 1);
 						continue;
 					}
@@ -2636,7 +2731,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 					{
 						if (valSize != 4 || !checkMask(fIP(value)))
 						{
-							sprintf(logBuff, "Warning: section [%s] Invalid subnetmask %s, option ignored", sectionName, raw);
+							snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] Invalid subnetmask %s, option ignored", sectionName, raw);
 							logDHCPMess(logBuff, 1);
 							continue;
 						}
@@ -2656,13 +2751,13 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 					}
 					else
 					{
-						sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+						snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 						logDHCPMess(logBuff, 1);
 					}
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, Invalid value, should be one or more IP/4 Bytes", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, Invalid value, should be one or more IP/4 Bytes", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2678,7 +2773,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 					j = atol(value);
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, value should be integer between 0 & %u or 4 bytes, option ignored", sectionName, name, UINT_MAX);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, value should be integer between 0 & %u or 4 bytes, option ignored", sectionName, name, UINT_MAX);
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -2690,13 +2785,13 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 //
 //					if (!strcasecmp(sectionName, GLOBALOPTIONS))
 //					{
-//						sprintf(logBuff, "Warning: section [%s] option %s not allowed in this section, please set it in [TIMINGS] section", sectionName, raw);
+//						snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s not allowed in this section, please set it in [TIMINGS] section", sectionName, raw);
 //						logDHCPMess(logBuff, 1);
 //						continue;
 //					}
 //					else if (j > cfig.lease)
 //					{
-//						sprintf(logBuff, "Warning: section [%s] option %s value should be less then %u (max lease), ignored", sectionName, name, cfig.lease);
+//						snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s value should be less then %u (max lease), ignored", sectionName, name, cfig.lease);
 //						logDHCPMess(logBuff, 1);
 //						continue;
 //					}
@@ -2714,7 +2809,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2730,7 +2825,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 					j = atol(value);
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, value should be between 0 & %u or 2 bytes, option ignored", sectionName, name, USHRT_MAX);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, value should be between 0 & %u or 2 bytes, option ignored", sectionName, name, USHRT_MAX);
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -2746,7 +2841,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2762,7 +2857,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 					j = atol(value);
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, value should be between 0 & %u or single byte, option ignored", sectionName, name, UCHAR_MAX);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, value should be between 0 & %u or single byte, option ignored", sectionName, name, UCHAR_MAX);
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -2779,7 +2874,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2799,7 +2894,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 					j = atoi(value);
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, value should be yes/on/true/1 or no/off/false/0, option ignored", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, value should be yes/on/true/1 or no/off/false/0, option ignored", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -2816,7 +2911,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2833,7 +2928,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 
 				if (opType == 2 && valType != 2)
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, value should be comma separated bytes or hex string, option ignored", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, value should be comma separated bytes or hex string, option ignored", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -2849,7 +2944,7 @@ void loadOptions(FILE *f, const char *sectionName, data20 *optionData)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: section [%s] option %s, no more space for options", sectionName, raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: section [%s] option %s, no more space for options", sectionName, raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -2957,7 +3052,7 @@ void addDHCPRange(char *dp)
 						|| (range->rangeStart >= rs && range->rangeStart <= re)
 						|| (range->rangeEnd >= rs && range->rangeEnd <= re))
 				{
-					sprintf(logBuff, "Warning: DHCP Range %s overlaps with another range, ignored", dp);
+					snprintf(logBuff, sizeof(logBuff), "Warning: DHCP Range %s overlaps with another range, ignored", dp);
 					logDHCPMess(logBuff, 1);
 					return;
 				}
@@ -2980,7 +3075,7 @@ void addDHCPRange(char *dp)
 					if (range->dhcpEntry)
 						free(range->dhcpEntry);
 
-					sprintf(logBuff, "DHCP Ranges Load, Memory Allocation Error");
+					snprintf(logBuff, sizeof(logBuff), "DHCP Ranges Load, Memory Allocation Error");
 					logDHCPMess(logBuff, 1);
 					return;
 				}
@@ -2988,13 +3083,13 @@ void addDHCPRange(char *dp)
 		}
 		else
 		{
-			sprintf(logBuff, "Section [%s] Invalid DHCP range %s in ini file, ignored", RANGESET, dp);
+			snprintf(logBuff, sizeof(logBuff), "Section [%s] Invalid DHCP range %s in ini file, ignored", RANGESET, dp);
 			logDHCPMess(logBuff, 1);
 		}
 	}
 	else
 	{
-		sprintf(logBuff, "Section [%s] Invalid DHCP range %s in ini file, ignored", RANGESET, dp);
+		snprintf(logBuff, sizeof(logBuff), "Section [%s] Invalid DHCP range %s in ini file, ignored", RANGESET, dp);
 		logDHCPMess(logBuff, 1);
 	}
 }
@@ -3014,7 +3109,7 @@ void addVendClass(MYBYTE rangeSetInd, char *vendClass, MYBYTE vendClassSize)
 
 	if(!rangeSet->vendClass[i])
 	{
-		sprintf(logBuff, "Vendor Class Load, Memory Allocation Error");
+		snprintf(logBuff, sizeof(logBuff), "Vendor Class Load, Memory Allocation Error");
 		logDHCPMess(logBuff, 1);
 	}
 	else
@@ -3042,7 +3137,7 @@ void addUserClass(MYBYTE rangeSetInd, char *userClass, MYBYTE userClassSize)
 
 	if(!rangeSet->userClass[i])
 	{
-		sprintf(logBuff, "Vendor Class Load, Memory Allocation Error");
+		snprintf(logBuff, sizeof(logBuff), "Vendor Class Load, Memory Allocation Error");
 		logDHCPMess(logBuff, 1);
 	}
 	else
@@ -3076,7 +3171,7 @@ void addMacRange(MYBYTE rangeSetInd, char *macRange)
 
 		if(!name[0] || !value[0])
 		{
-			sprintf(logBuff, "Section [%s], invalid Filter_Mac_Range %s, ignored", RANGESET, macRange);
+			snprintf(logBuff, sizeof(logBuff), "Section [%s], invalid Filter_Mac_Range %s, ignored", RANGESET, macRange);
 			logDHCPMess(logBuff, 1);
 		}
 		else
@@ -3088,26 +3183,26 @@ void addMacRange(MYBYTE rangeSetInd, char *macRange)
 
 			if(!macStart || !macEnd)
 			{
-				sprintf(logBuff, "DHCP Range Load, Memory Allocation Error");
+				snprintf(logBuff, sizeof(logBuff), "DHCP Range Load, Memory Allocation Error");
 				logDHCPMess(logBuff, 1);
 			}
 			else if (getHexValue(macStart, name, &macSize1) || getHexValue(macEnd, value, &macSize2))
 			{
-				sprintf(logBuff, "Section [%s], Invalid character in Filter_Mac_Range %s", RANGESET, macRange);
+				snprintf(logBuff, sizeof(logBuff), "Section [%s], Invalid character in Filter_Mac_Range %s", RANGESET, macRange);
 				logDHCPMess(logBuff, 1);
 				free(macStart);
 				free(macEnd);
 			}
 			else if (memcmp(macStart, macEnd, 16) > 0)
 			{
-				sprintf(logBuff, "Section [%s], Invalid Filter_Mac_Range %s, (higher bound specified on left), ignored", RANGESET, macRange);
+				snprintf(logBuff, sizeof(logBuff), "Section [%s], Invalid Filter_Mac_Range %s, (higher bound specified on left), ignored", RANGESET, macRange);
 				logDHCPMess(logBuff, 1);
 				free(macStart);
 				free(macEnd);
 			}
 			else if (macSize1 != macSize2)
 			{
-				sprintf(logBuff, "Section [%s], Invalid Filter_Mac_Range %s, (start/end size mismatched), ignored", RANGESET, macRange);
+				snprintf(logBuff, sizeof(logBuff), "Section [%s], Invalid Filter_Mac_Range %s, (start/end size mismatched), ignored", RANGESET, macRange);
 				logDHCPMess(logBuff, 1);
 				free(macStart);
 				free(macEnd);
@@ -3268,7 +3363,7 @@ void loadDHCP()
 
 							if (!dhcpEntry)
 							{
-								sprintf(logBuff, "Host Options Load, Memory Allocation Error");
+								snprintf(logBuff, sizeof(logBuff), "Host Options Load, Memory Allocation Error");
 								logDHCPMess(logBuff, 1);
 								return;
 							}
@@ -3277,7 +3372,7 @@ void loadDHCP()
 
 							if (!dhcpEntry->mapname)
 							{
-								sprintf(logBuff, "Host Data Load, Memory Allocation Error");
+								snprintf(logBuff, sizeof(logBuff), "Host Data Load, Memory Allocation Error");
 								logDHCPMess(logBuff, 1);
 								return;
 							}
@@ -3291,31 +3386,31 @@ void loadDHCP()
 						}
 						else
 						{
-							sprintf(logBuff, "Static DHCP Host [%s] Duplicate IP Address %s, Entry ignored", sectionName, IP2String(tempbuff, optionData.ip));
+							snprintf(logBuff, sizeof(logBuff), "Static DHCP Host [%s] Duplicate IP Address %s, Entry ignored", sectionName, IP2String(tempbuff, optionData.ip));
 							logDHCPMess(logBuff, 1);
 						}
 					}
 					else
 					{
-						sprintf(logBuff, "Duplicate Static DHCP Host [%s] ignored", sectionName);
+						snprintf(logBuff, sizeof(logBuff), "Duplicate Static DHCP Host [%s] ignored", sectionName);
 						logDHCPMess(logBuff, 1);
 					}
 				}
 				else
 				{
-					sprintf(logBuff, "Invalid Static DHCP Host MAC Addr size, ignored", sectionName);
+					snprintf(logBuff, sizeof(logBuff), "Invalid Static DHCP Host MAC Addr size, ignored", sectionName);
 					logDHCPMess(logBuff, 1);
 				}
 			}
 			else
 			{
-				sprintf(logBuff, "Invalid Static DHCP Host MAC Addr [%s] ignored", sectionName);
+				snprintf(logBuff, sizeof(logBuff), "Invalid Static DHCP Host MAC Addr [%s] ignored", sectionName);
 				logDHCPMess(logBuff, 1);
 			}
 
 			if (!optionData.ip)
 			{
-				sprintf(logBuff, "Warning: No IP Address for DHCP Static Host %s specified", sectionName);
+				snprintf(logBuff, sizeof(logBuff), "Warning: No IP Address for DHCP Static Host %s specified", sectionName);
 				logDHCPMess(logBuff, 1);
 			}
 		}
@@ -3323,7 +3418,7 @@ void loadDHCP()
 		fclose(ff);
 	}
 
-	ff = fopen(leaFile, "rb");
+	ff = safeOpen(leaFile, "rb");
 
 	if (ff)
 	{
@@ -3366,7 +3461,7 @@ void loadDHCP()
 
 					if (!dhcpEntry)
 					{
-						sprintf(logBuff, "Loading Existing Leases, Memory Allocation Error");
+						snprintf(logBuff, sizeof(logBuff), "Loading Existing Leases, Memory Allocation Error");
 						logDHCPMess(logBuff, 1);
 						return;
 					}
@@ -3375,7 +3470,7 @@ void loadDHCP()
 
 					if (!dhcpEntry->mapname)
 					{
-						sprintf(logBuff, "Loading Existing Leases, Memory Allocation Error");
+						snprintf(logBuff, sizeof(logBuff), "Loading Existing Leases, Memory Allocation Error");
 						free(dhcpEntry);
 						logDHCPMess(logBuff, 1);
 						return;
@@ -3392,8 +3487,11 @@ void loadDHCP()
 					dhcpEntry->local = dhcpData.local;
 					dhcpEntry->display = true;
 
+					dhcpData.hostname[sizeof(dhcpData.hostname) - 1] = 0;
+					sanitizeHostname(dhcpData.hostname);
+
 					if (dhcpData.hostname[0])
-						dhcpEntry->hostname = cloneString(dhcpData.hostname);
+						setHostname(dhcpEntry, dhcpData.hostname);
 
 					setLeaseExpiry(dhcpEntry);
 
@@ -3404,7 +3502,7 @@ void loadDHCP()
 
 		fclose(ff);
 
-		ff = fopen(leaFile, "wb");
+		ff = safeOpen(leaFile, "wb");
 		cfig.dhcpInd = 0;
 
 		if (ff)
@@ -3423,7 +3521,7 @@ void loadDHCP()
 					dhcpData.local = dhcpEntry->local;
 
 					if (dhcpEntry->hostname)
-						strcpy(dhcpData.hostname, dhcpEntry->hostname);
+						snprintf(dhcpData.hostname, sizeof(dhcpData.hostname), "%s", dhcpEntry->hostname);
 
 					cfig.dhcpInd++;
 					dhcpData.dhcpInd = cfig.dhcpInd;
@@ -3534,7 +3632,7 @@ FILE *openSection(const char *sectionName, MYBYTE serial)
 								return f;
 							else
 							{
-								sprintf(logBuff, "Error: Section [%s], file %s not found", sectionName, tempbuff);
+								snprintf(logBuff, sizeof(logBuff), "Error: Section [%s], file %s not found", sectionName, tempbuff);
 								logDHCPMess(logBuff, 1);
 								return NULL;
 							}
@@ -4206,7 +4304,7 @@ void checkSize()
 
 		if (dhcpEntry->expiry < t)
 		{
-			sprintf(logBuff, "Lease %s Being Released", IP2String(tempbuff, dhcpEntry->ip));
+			snprintf(logBuff, sizeof(logBuff), "Lease %s Being Released", IP2String(tempbuff, dhcpEntry->ip));
 			logDHCPMess(logBuff, 2);
 			q = p;
 			p++;
@@ -4243,12 +4341,12 @@ void *updateStateFile(void *lparam)
 	dhcpData.local = dhcpEntry->local;
 
 	if (dhcpEntry->hostname)
-		strcpy(dhcpData.hostname, dhcpEntry->hostname);
+		snprintf(dhcpData.hostname, sizeof(dhcpData.hostname), "%s", dhcpEntry->hostname);
 
 	if (dhcpEntry->dhcpInd)
 	{
 		dhcpData.dhcpInd = dhcpEntry->dhcpInd;
-		FILE *f = fopen(leaFile, "rb+");
+		FILE *f = safeOpen(leaFile, "rb+");
 
 		if (f)
 		{
@@ -4263,7 +4361,7 @@ void *updateStateFile(void *lparam)
 		cfig.dhcpInd++;
 		dhcpEntry->dhcpInd = cfig.dhcpInd;
 		dhcpData.dhcpInd = cfig.dhcpInd;
-		FILE *f = fopen(leaFile, "ab");
+		FILE *f = safeOpen(leaFile, "ab");
 
 		if (f)
 		{
@@ -4274,7 +4372,7 @@ void *updateStateFile(void *lparam)
 /*
 	if (dhcpData->dhcpInd)
 	{
-		FILE *f = fopen(leaFile, "rb+");
+		FILE *f = safeOpen(leaFile, "rb+");
 
 		if (f)
 		{
@@ -4289,7 +4387,7 @@ void *updateStateFile(void *lparam)
 	{
 		dhcpData->dhcpInd = cfig.dhcpInd;
 
-		FILE *f = fopen(leaFile, "ab");
+		FILE *f = safeOpen(leaFile, "ab");
 		if (f)
 		{
 			fwrite(dhcpData, sizeof(data8), 1, f);
@@ -4423,7 +4521,7 @@ void *init(void *lparam)
 		if (tempbuff[0])
 			logDHCPMess(logBuff, 1);
 
-		sprintf(logBuff, "%s Starting...", sVersion);
+		snprintf(logBuff, sizeof(logBuff), "%s Starting...", sVersion);
 		logDHCPMess(logBuff, 1);
 	}
 	else
@@ -4437,7 +4535,7 @@ void *init(void *lparam)
 	}
 	else
 	{
-		sprintf(logBuff, "Warning: file %s not found, defaults will be used", iniFile);
+		snprintf(logBuff, sizeof(logBuff), "Warning: file %s not found, defaults will be used", iniFile);
 		logDHCPMess(logBuff, 1);
 	}
 
@@ -4445,11 +4543,11 @@ void *init(void *lparam)
 	cfig.lease = 36000;
 
 	if (cfig.dhcpLogLevel > 1)
-		sprintf(logBuff, "Logging: All");
+		snprintf(logBuff, sizeof(logBuff), "Logging: All");
 	else if (cfig.dhcpLogLevel >= 1)
-		sprintf(logBuff, "Logging: Normal");
+		snprintf(logBuff, sizeof(logBuff), "Logging: Normal");
 	else
-		sprintf(logBuff, "Logging: None");
+		snprintf(logBuff, sizeof(logBuff), "Logging: None");
 
 	logDHCPMess(logBuff, 1);
 
@@ -4464,7 +4562,7 @@ void *init(void *lparam)
 			}
 			else
 			{
-				sprintf(logBuff, "Warning: Section [LISTEN_ON], Invalid Interface Address %s, ignored", raw);
+				snprintf(logBuff, sizeof(logBuff), "Warning: Section [LISTEN_ON], Invalid Interface Address %s, ignored", raw);
 				logDHCPMess(logBuff, 1);
 			}
 		}
@@ -4503,7 +4601,7 @@ void *init(void *lparam)
 
 	if (cfig.fixedSocket < 0)
 	{
-		sprintf(logBuff, "Failed to Create Socket");
+		snprintf(logBuff, sizeof(logBuff), "Failed to Create Socket");
 		logDHCPMess(logBuff, 1);
 		exit(EXIT_FAILURE);
 	}
@@ -4527,19 +4625,19 @@ void *init(void *lparam)
 						cfig.zoneServers[1] = inet_addr(value);
 					else
 					{
-						sprintf(logBuff, "Section [REPLICATION_SERVERS] Invalid Entry: %s ignored", raw);
+						snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS] Invalid Entry: %s ignored", raw);
 						logDHCPMess(logBuff, 1);
 					}
 				}
 				else
 				{
-					sprintf(logBuff, "Section [REPLICATION_SERVERS] Invalid Entry: %s ignored", raw);
+					snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS] Invalid Entry: %s ignored", raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
 			else
 			{
-				sprintf(logBuff, "Section [REPLICATION_SERVERS], Missing value, entry %s ignored", raw);
+				snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS], Missing value, entry %s ignored", raw);
 				logDHCPMess(logBuff, 1);
 			}
 		}
@@ -4547,19 +4645,19 @@ void *init(void *lparam)
 
 	if (!cfig.zoneServers[0] && cfig.zoneServers[1])
 	{
-		sprintf(logBuff, "Section [REPLICATION_SERVERS] Missing Primary Server");
+		snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS] Missing Primary Server");
 		logDHCPMess(logBuff, 1);
 	}
 	else if (cfig.zoneServers[0] && !cfig.zoneServers[1])
 	{
-		sprintf(logBuff, "Section [REPLICATION_SERVERS] Missing Secondary Server");
+		snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS] Missing Secondary Server");
 		logDHCPMess(logBuff, 1);
 	}
 	else if (cfig.zoneServers[0] && cfig.zoneServers[1])
 	{
 		if (findServer(newNetwork.allServers, MAX_SERVERS, cfig.zoneServers[0]) && findServer(newNetwork.allServers, MAX_SERVERS, cfig.zoneServers[1]))
 		{
-			sprintf(logBuff, "Section [REPLICATION_SERVERS] Primary & Secondary should be Different Boxes");
+			snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS] Primary & Secondary should be Different Boxes");
 			logDHCPMess(logBuff, 1);
 		}
 		else if (findServer(newNetwork.allServers, MAX_SERVERS, cfig.zoneServers[0]))
@@ -4568,7 +4666,7 @@ void *init(void *lparam)
 			cfig.replication = 2;
 		else
 		{
-			sprintf(logBuff, "Section [REPLICATION_SERVERS] No Server IP not found on this Machine");
+			snprintf(logBuff, sizeof(logBuff), "Section [REPLICATION_SERVERS] No Server IP not found on this Machine");
 			logDHCPMess(logBuff, 1);
 		}
 	}
@@ -4578,14 +4676,14 @@ void *init(void *lparam)
 		lockIP(cfig.zoneServers[0]);
 		lockIP(cfig.zoneServers[1]);
 
-		//sprintf(logBuff, "Contacting Primary DHCP Server %s", IP2String(tempbuff, cfig.zoneServers[0]));
+		//snprintf(logBuff, sizeof(logBuff), "Contacting Primary DHCP Server %s", IP2String(tempbuff, cfig.zoneServers[0]));
 		//logDHCPMess(logBuff, 1);
 
 		cfig.dhcpReplConn.sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
 		if (cfig.dhcpReplConn.sock == INVALID_SOCKET)
 		{
-			sprintf(logBuff, "Failed to Create DHCP Replication Socket");
+			snprintf(logBuff, sizeof(logBuff), "Failed to Create DHCP Replication Socket");
 			logDHCPMess(logBuff, 1);
 		}
 		else
@@ -4606,7 +4704,7 @@ void *init(void *lparam)
 			if (nRet == SOCKET_ERROR)
 			{
 				cfig.dhcpReplConn.ready = false;
-				sprintf(logBuff, "DHCP Replication Server, Bind Failed");
+				snprintf(logBuff, sizeof(logBuff), "DHCP Replication Server, Bind Failed");
 				logDHCPMess(logBuff, 1);
 			}
 			else
@@ -4660,11 +4758,11 @@ void *init(void *lparam)
 	sprintf(cfig.servername_fqn, "%s.%s", cfig.servername, cfig.zone);
 
 	if (cfig.replication == 1)
-		sprintf(logBuff, "Server Name: %s (Primary)", cfig.servername);
+		snprintf(logBuff, sizeof(logBuff), "Server Name: %s (Primary)", cfig.servername);
 	else if (cfig.replication == 2)
-		sprintf(logBuff, "Server Name: %s (Secondary)", cfig.servername);
+		snprintf(logBuff, sizeof(logBuff), "Server Name: %s (Secondary)", cfig.servername);
 	else
-		sprintf(logBuff, "Server Name: %s", cfig.servername);
+		snprintf(logBuff, sizeof(logBuff), "Server Name: %s", cfig.servername);
 
 	logDHCPMess(logBuff, 1);
 
@@ -4697,14 +4795,14 @@ void *init(void *lparam)
 				if (j == MAX_SERVERS || !newNetwork.allServers[j])
 				{
 					bindfailed = true;
-					sprintf(logBuff, "Warning: Section [LISTEN_ON], Interface %s not available, ignored", IP2String(tempbuff, cfig.specifiedServers[i]));
+					snprintf(logBuff, sizeof(logBuff), "Warning: Section [LISTEN_ON], Interface %s not available, ignored", IP2String(tempbuff, cfig.specifiedServers[i]));
 					logDHCPMess(logBuff, 1);
 				}
 			}
 		}
 		else
 		{
-			sprintf(logBuff, "Detecting Static Interfaces..");
+			snprintf(logBuff, sizeof(logBuff), "Detecting Static Interfaces..");
 			logDHCPMess(logBuff, 1);
 
 			for (MYBYTE i = 0; i < MAX_SERVERS && newNetwork.allServers[i]; i++)
@@ -4718,7 +4816,7 @@ void *init(void *lparam)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: Interface %s is not Static, not used", IP2String(tempbuff, newNetwork.allServers[i]));
+					snprintf(logBuff, sizeof(logBuff), "Warning: Interface %s is not Static, not used", IP2String(tempbuff, newNetwork.allServers[i]));
 					logDHCPMess(logBuff, 2);
 					break;
 				}
@@ -4755,7 +4853,7 @@ void *init(void *lparam)
 				if (newNetwork.dhcpConn[i].sock == INVALID_SOCKET)
 				{
 					bindfailed = true;
-					sprintf(logBuff, "Failed to Create Socket");
+					snprintf(logBuff, sizeof(logBuff), "Failed to Create Socket");
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -4779,7 +4877,7 @@ void *init(void *lparam)
 				if (nRet == SOCKET_ERROR)
 				{
 					close(newNetwork.dhcpConn[i].sock);
-					sprintf(logBuff, "%s Port 67 already in use", IP2String(tempbuff, newNetwork.listenServers[j]));
+					snprintf(logBuff, sizeof(logBuff), "%s Port 67 already in use", IP2String(tempbuff, newNetwork.listenServers[j]));
 					logDHCPMess(logBuff, 1);
 					continue;
 				}
@@ -4813,7 +4911,7 @@ void *init(void *lparam)
 
 			if (newNetwork.dhcpListener.sock == INVALID_SOCKET)
 			{
-				sprintf(logBuff, "Failed to Creat DHCP Socket");
+				snprintf(logBuff, sizeof(logBuff), "Failed to Creat DHCP Socket");
 				logDHCPMess(logBuff, 1);
 			}
 			else
@@ -4837,7 +4935,7 @@ void *init(void *lparam)
 				if (nRet == SOCKET_ERROR)
 				{
 					close(newNetwork.dhcpListener.sock);
-					sprintf(logBuff, "DHCP Port 67 already in use");
+					snprintf(logBuff, sizeof(logBuff), "DHCP Port 67 already in use");
 					logDHCPMess(logBuff, 1);
 				}
 				else
@@ -4851,8 +4949,10 @@ void *init(void *lparam)
 			}
 		}
 
+		// página de status só local por padrão (não tem senha e mostra MACs e nomes da rede);
+		// para abrir na rede, configure [HTTP_INTERFACE] HTTPServer=<ip>:<porta> e HTTPClient
 		newNetwork.httpConn.port = 6789;
-		newNetwork.httpConn.server = newNetwork.dhcpConn[0].server;
+		newNetwork.httpConn.server = inet_addr("127.0.0.1");
 		newNetwork.httpConn.loaded = true;
 
 		if (f = openSection("HTTP_INTERFACE", 1))
@@ -4873,7 +4973,7 @@ void *init(void *lparam)
 					else
 					{
 						newNetwork.httpConn.loaded = false;
-						sprintf(logBuff, "Warning: Section [HTTP_INTERFACE], Invalid IP Address %s, ignored", name);
+						snprintf(logBuff, sizeof(logBuff), "Warning: Section [HTTP_INTERFACE], Invalid IP Address %s, ignored", name);
 						logDHCPMess(logBuff, 1);
 					}
 
@@ -4884,7 +4984,7 @@ void *init(void *lparam)
 						else
 						{
 							newNetwork.httpConn.loaded = false;
-							sprintf(logBuff, "Warning: Section [HTTP_INTERFACE], Invalid port %s, ignored", value);
+							snprintf(logBuff, sizeof(logBuff), "Warning: Section [HTTP_INTERFACE], Invalid port %s, ignored", value);
 							logDHCPMess(logBuff, 1);
 						}
 					}
@@ -4893,7 +4993,7 @@ void *init(void *lparam)
 					{
 						bindfailed = true;
 						newNetwork.httpConn.loaded = false;
-						sprintf(logBuff, "Warning: Section [HTTP_INTERFACE], %s not available, ignored", raw);
+						snprintf(logBuff, sizeof(logBuff), "Warning: Section [HTTP_INTERFACE], %s not available, ignored", raw);
 						logDHCPMess(logBuff, 1);
 					}
 				}
@@ -4903,7 +5003,7 @@ void *init(void *lparam)
 						addServer(cfig.httpClients, 8, inet_addr(value));
 					else
 					{
-						sprintf(logBuff, "Warning: Section [HTTP_INTERFACE], invalid client IP %s, ignored", raw);
+						snprintf(logBuff, sizeof(logBuff), "Warning: Section [HTTP_INTERFACE], invalid client IP %s, ignored", raw);
 						logDHCPMess(logBuff, 1);
 					}
 				}
@@ -4914,7 +5014,7 @@ void *init(void *lparam)
 				}
 				else
 				{
-					sprintf(logBuff, "Warning: Section [HTTP_INTERFACE], invalid entry %s, ignored", raw);
+					snprintf(logBuff, sizeof(logBuff), "Warning: Section [HTTP_INTERFACE], invalid entry %s, ignored", raw);
 					logDHCPMess(logBuff, 1);
 				}
 			}
@@ -4940,7 +5040,7 @@ void *init(void *lparam)
 			if (newNetwork.httpConn.sock == INVALID_SOCKET)
 			{
 				bindfailed = true;
-				sprintf(logBuff, "Failed to Create Socket");
+				snprintf(logBuff, sizeof(logBuff), "Failed to Create Socket");
 				logDHCPMess(logBuff, 1);
 			}
 			else
@@ -4958,7 +5058,7 @@ void *init(void *lparam)
 				if (nRet == SOCKET_ERROR)
 				{
 					bindfailed = true;
-					sprintf(logBuff, "Http Interface %s TCP Port %u not available", IP2String(tempbuff, newNetwork.httpConn.server), newNetwork.httpConn.port);
+					snprintf(logBuff, sizeof(logBuff), "Http Interface %s TCP Port %u not available", IP2String(tempbuff, newNetwork.httpConn.server), newNetwork.httpConn.port);
 					logDHCPMess(logBuff, 1);
 					closesocket(newNetwork.httpConn.sock);
 				}
@@ -4969,7 +5069,7 @@ void *init(void *lparam)
 					if (nRet == SOCKET_ERROR)
 					{
 						bindfailed = true;
-						sprintf(logBuff, "%s TCP Port %u Error on Listen", IP2String(tempbuff, newNetwork.httpConn.server), newNetwork.httpConn.port);
+						snprintf(logBuff, sizeof(logBuff), "%s TCP Port %u Error on Listen", IP2String(tempbuff, newNetwork.httpConn.server), newNetwork.httpConn.port);
 						logDHCPMess(logBuff, 1);
 						closesocket(newNetwork.httpConn.sock);
 					}
@@ -5002,14 +5102,14 @@ void *init(void *lparam)
 
 		if (!network.dhcpConn[0].ready)
 		{
-			sprintf(logBuff, "No Static Interface ready, Waiting...");
+			snprintf(logBuff, sizeof(logBuff), "No Static Interface ready, Waiting...");
 			logDHCPMess(logBuff, 1);
 			continue;
 		}
 
 		if (network.httpConn.ready)
 		{
-			sprintf(logBuff, "Lease Status URL: http://%s:%u", IP2String(tempbuff, network.httpConn.server), network.httpConn.port);
+			snprintf(logBuff, sizeof(logBuff), "Lease Status URL: http://%s:%u", IP2String(tempbuff, network.httpConn.server), network.httpConn.port);
 			logDHCPMess(logBuff, 1);
 		}
 
@@ -5019,7 +5119,7 @@ void *init(void *lparam)
 			{
 				if (network.dhcpConn[j].server == network.allServers[i])
 				{
-					sprintf(logBuff, "Listening On: %s", IP2String(tempbuff, network.allServers[i]));
+					snprintf(logBuff, sizeof(logBuff), "Listening On: %s", IP2String(tempbuff, network.allServers[i]));
 					logDHCPMess(logBuff, 1);
 					break;
 				}
@@ -5047,7 +5147,7 @@ bool detectChange()
 		if (memcmp(cfig.oldservers, newNetwork.staticServers, (MAX_SERVERS * sizeof(MYDWORD))))
 		{
 			memcpy(cfig.oldservers, newNetwork.staticServers, (MAX_SERVERS * sizeof(MYDWORD)));
-			sprintf(logBuff, "Network changed, re-detecting Listening Interfaces..");
+			snprintf(logBuff, sizeof(logBuff), "Network changed, re-detecting Listening Interfaces..");
 			logDHCPMess(logBuff, 1);
 			break;
 		}
@@ -5057,7 +5157,7 @@ bool detectChange()
 
 			if (kRunning && cfig.failureCycle == (MYDWORD)pow(2, cfig.failureCount))
 			{
-				sprintf(logBuff, "Retrying failed Listening Interfaces..");
+				snprintf(logBuff, sizeof(logBuff), "Retrying failed Listening Interfaces..");
 				logDHCPMess(logBuff, 1);
 				break;
 			}
@@ -5236,6 +5336,11 @@ MYWORD gdmess(data9 *req, MYBYTE sockInd)
 	if (req->dhcpp.header.bp_op != BOOTP_REQUEST)
 		return 0;
 
+	// pacote menor que o cabeçalho ou com endereço de hardware maior que o campo (16 bytes):
+	// descarta (hlen alto estourava chaddr, o nome gerado e os logs)
+	if (req->bytes < (int)sizeof(dhcp_header) || req->dhcpp.header.bp_hlen > 16)
+		return 0;
+
 	hex2String(req->chaddr, req->dhcpp.header.bp_chaddr, req->dhcpp.header.bp_hlen);
 
 	data3 *op;
@@ -5244,15 +5349,40 @@ MYWORD gdmess(data9 *req, MYBYTE sockInd)
 
 	for (; raw < rawEnd && *raw != DHCP_OPTION_END;)
 	{
+		if (*raw == DHCP_OPTION_PAD)
+		{
+			raw++;
+			continue;
+		}
+
+		// a opção inteira (código, tamanho e valor) precisa caber no que foi recebido
+		if (raw + 2 > rawEnd || raw + 2 + raw[1] > rawEnd)
+			break;
+
 		op = (data3*)raw;
 		//printf("OpCode=%u,MessType=%u\n", op->opt_code, op->value[0]);
 
+		// valores numéricos precisam do tamanho certo
+		MYBYTE need = 0;
 		switch (op->opt_code)
 		{
-			case DHCP_OPTION_PAD:
-				raw++;
-				continue;
+			case DHCP_OPTION_MESSAGETYPE: need = 1; break;
+			case DHCP_OPTION_MAXDHCPMSGSIZE: need = 2; break;
+			case DHCP_OPTION_SERVERID:
+			case DHCP_OPTION_IPADDRLEASE:
+			case DHCP_OPTION_REQUESTEDIPADDR:
+			case DHCP_OPTION_SUBNETSELECTION:
+			case DHCP_OPTION_REBINDINGTIME: need = 4; break;
+		}
 
+		if (op->size < need)
+		{
+			raw += 2 + op->size;
+			continue;
+		}
+
+		switch (op->opt_code)
+		{
 			case DHCP_OPTION_PARAMREQLIST:
 				for (int ix = 0; ix < op->size; ix++)
 					req->paramreqlist[op->value[ix]] = 1;
@@ -5279,14 +5409,17 @@ MYWORD gdmess(data9 *req, MYBYTE sockInd)
 				break;
 
 			case DHCP_OPTION_HOSTNAME:
-				if (op->size && strcasecmp((char*)op->value, "(none)") && strcasecmp((char*)op->value, cfig.servername))
+				if (op->size)
 				{
-					memcpy(req->hostname, op->value, op->size);
-					req->hostname[op->size] = 0;
-					req->hostname[64] = 0;
+					char h[256];
+					memcpy(h, op->value, op->size);
+					h[op->size] = 0;
 
-					if (char *ptr = strchr(req->hostname, '.'))
-						*ptr = 0;
+					if (strcasecmp(h, "(none)") && strcasecmp(h, cfig.servername))
+					{
+						sanitizeHostname(h);
+						strcpy(req->hostname, h); // até 63 caracteres em hostname[256]
+					}
 				}
 				break;
 
@@ -5336,32 +5469,37 @@ MYWORD gdmess(data9 *req, MYBYTE sockInd)
 			req->messsize = sizeof(dhcp_packet);
 	}
 
+	// a resposta é montada num buffer de sizeof(dhcp_packet): o tamanho pedido pelo cliente
+	// (opção 57) nunca pode passar disso
+	if (req->messsize > sizeof(dhcp_packet))
+		req->messsize = sizeof(dhcp_packet);
+
 	if (cfig.dhcpLogLevel >= 2)
 	{
 		if (req->req_type == DHCP_MESS_NONE)
 		{
 			if (req->dhcpp.header.bp_giaddr)
-				sprintf(logBuff, "BOOTP request for %s (%s) from RelayAgent %s received", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
+				snprintf(logBuff, sizeof(logBuff), "BOOTP request for %s (%s) from RelayAgent %s received", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
 			else
-				sprintf(logBuff, "BOOTP request for %s (%s) from interface %s received", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
+				snprintf(logBuff, sizeof(logBuff), "BOOTP request for %s (%s) from interface %s received", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
 
 			logDHCPMess(logBuff, 2);
 		}
 		else if (req->req_type == DHCP_MESS_DISCOVER)
 		{
 			if (req->dhcpp.header.bp_giaddr)
-				sprintf(logBuff, "DHCP discover for %s (%s) from RelayAgent %s received", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
+				snprintf(logBuff, sizeof(logBuff), "DHCP discover for %s (%s) from RelayAgent %s received", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
 			else
-				sprintf(logBuff, "DHCP discover for %s (%s) from interface %s received", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
+				snprintf(logBuff, sizeof(logBuff), "DHCP discover for %s (%s) from interface %s received", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
 
 			logDHCPMess(logBuff, 2);
 		}
 		else if (req->req_type == DHCP_MESS_REQUEST)
 		{
 			if (req->dhcpp.header.bp_giaddr)
-				sprintf(logBuff, "DHCP request for %s (%s) from RelayAgent %s received", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
+				snprintf(logBuff, sizeof(logBuff), "DHCP request for %s (%s) from RelayAgent %s received", req->chaddr, req->hostname, IP2String(tempbuff, req->dhcpp.header.bp_giaddr));
 			else
-				sprintf(logBuff, "DHCP request for %s (%s) from interface %s received", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
+				snprintf(logBuff, sizeof(logBuff), "DHCP request for %s (%s) from interface %s received", req->chaddr, req->hostname, IP2String(tempbuff, network.dhcpConn[req->sockInd].server));
 
 			logDHCPMess(logBuff, 2);
 		}
@@ -5392,7 +5530,7 @@ void *logThread(void *lpParam)
 	{
 		if (cfig.logFileName[0])
 		{
-			FILE *f = fopen(cfig.logFileName, "at");
+			FILE *f = safeOpen(cfig.logFileName, "at");
 
 			if (f)
 			{
@@ -5401,7 +5539,7 @@ void *logThread(void *lpParam)
 			}
 
 			strcpy(cfig.logFileName, buffer);
-			f = fopen(cfig.logFileName, "at");
+			f = safeOpen(cfig.logFileName, "at");
 
 			if (f)
 			{
@@ -5413,7 +5551,7 @@ void *logThread(void *lpParam)
 		strcpy(cfig.logFileName, buffer);
 	}
 
-	FILE *f = fopen(cfig.logFileName, "at");
+	FILE *f = safeOpen(cfig.logFileName, "at");
 
 	if (f)
 	{
@@ -5471,9 +5609,9 @@ data7 *createCache(data71 *lump)
 	cache->hostname = (char*)dp;
 
 	if (lump->hostname)
-		strcpy(cache->hostname, lump->hostname);
+		snprintf(cache->hostname, HOSTNAME_SIZE, "%s", lump->hostname);
 
-	dp += 65;
+	dp += HOSTNAME_SIZE;
 
 	if (lump->optionSize >= 3)
 	{
