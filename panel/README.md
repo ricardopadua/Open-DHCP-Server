@@ -25,6 +25,11 @@ Rust. É um programa separado: **o servidor DHCP (`opendhcpd`) não muda**. O pa
 | Opções globais | `[GLOBAL_OPTIONS]`: domínio, máscara, gateway, DNS e lease padrão |
 | Minha conta | Troca o usuário e a senha do painel (grava o novo hash no `panel.toml` e encerra as outras sessões) |
 
+**Idiomas:** português, inglês, francês e espanhol. O seletor (globo, ao lado do sino) fica no
+topo de todas as telas e no login; a escolha vale por 1 ano (cookie `odp_lang`). Na primeira
+visita o painel usa o idioma do navegador (`Accept-Language`) e, se não for nenhum desses, o
+português.
+
 **Alertas** no topo de todas as telas: serviço parado, faixa com 80%/90% ocupada, pedidos de IP
 sem faixa correspondente (dispositivos sem rede) e conflitos de IP nos últimos 15 minutos.
 
@@ -76,6 +81,14 @@ Com a senha de fábrica `admin`, todas as telas mostram um aviso até ela ser tr
   a alteração de outra pessoa).
 - Ouve só em `127.0.0.1` por padrão. Para acesso remoto, use um proxy com HTTPS e
   `secure_cookie = true`. Não exponha o painel sem TLS na mesma rede dos dispositivos.
+
+## Traduções
+
+Os textos ficam em português no código, marcados com `t("...")`, `tf!("... {}", valor)`,
+`tm(...)` (com HTML), `n_("...")` (constantes) ou `msg!(...)` (mensagens traduzidas na hora de
+mostrar). As traduções estão em `src/i18n_table.rs`, uma linha por texto:
+`[português, inglês, francês, espanhol]`. O `cargo test` falha se algum texto marcado ficar sem
+tradução, se sobrar tradução sem uso ou se o número de `{}` não bater.
 
 ## Desenvolvimento
 

@@ -13,6 +13,8 @@
 //! - `No Matching DHCP Range for DHCPDISCOVER for <mac> (<nome>) from interface <ip>`
 //! - `Static DHCP Host <mac> (<nome>) has No IP, DHCPDISCOVER ignored`
 
+use crate::i18n::{n_, t};
+use crate::tf;
 use chrono::NaiveDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,18 +33,18 @@ pub enum Kind {
 
 impl Kind {
     pub fn label(self) -> &'static str {
-        match self {
-            Kind::Allot => "IP entregue",
-            Kind::Renew => "Renovação",
-            Kind::Offer => "Oferta",
-            Kind::Release => "Liberado",
-            Kind::Decline => "Conflito",
-            Kind::Nak => "Recusado",
-            Kind::NoRange => "Sem faixa",
-            Kind::Blocked => "Bloqueado",
-            Kind::ServerStop => "Servidor",
-            Kind::Info => "Info",
-        }
+        t(match self {
+            Kind::Allot => n_("IP entregue"),
+            Kind::Renew => n_("Renovação"),
+            Kind::Offer => n_("Oferta"),
+            Kind::Release => n_("Liberado"),
+            Kind::Decline => n_("Conflito"),
+            Kind::Nak => n_("Recusado"),
+            Kind::NoRange => n_("Sem faixa"),
+            Kind::Blocked => n_("Bloqueado"),
+            Kind::ServerStop => n_("Servidor"),
+            Kind::Info => n_("Info"),
+        })
     }
 
     /// Classe de cor do selo (ok/warn/bad ou neutro).
@@ -170,25 +172,26 @@ pub fn describe(ev: &Event) -> String {
         _ => String::new(),
     };
     let ip = ev.ip.as_deref().unwrap_or("?");
-    let dur = ev.secs.map(fmt_secs).map(|d| format!(" por {d}")).unwrap_or_default();
-    match ev.kind {
-        Kind::Allot => format!("{who} recebeu {ip}{dur}"),
-        Kind::Renew => format!("{who} renovou {ip}{dur}"),
-        Kind::Offer => format!("{ip} oferecido a {who}"),
-        Kind::Release => format!("{who} devolveu {ip}"),
-        Kind::Decline => format!("{who} recusou {ip}: o IP já está em uso na rede (bloqueado pelo servidor)"),
-        Kind::Nak => format!("Pedido de {who} recusado (renovação sem DISCOVER)"),
-        Kind::NoRange => format!("{who} pediu IP pela interface {ip}, mas nenhuma faixa atende essa rede"),
-        Kind::Blocked => format!("{who} está bloqueado (reserva sem IP); pedido ignorado"),
-        Kind::ServerStop => "Servidor DHCP parado".to_string(),
-        Kind::Info => ev.text.clone(),
+    match (ev.kind, ev.secs.map(fmt_secs)) {
+        (Kind::Allot, Some(d)) => tf!("{} recebeu {} por {}", who, ip, d),
+        (Kind::Allot, None) => tf!("{} recebeu {}", who, ip),
+        (Kind::Renew, Some(d)) => tf!("{} renovou {} por {}", who, ip, d),
+        (Kind::Renew, None) => tf!("{} renovou {}", who, ip),
+        (Kind::Offer, _) => tf!("{} oferecido a {}", ip, who),
+        (Kind::Release, _) => tf!("{} devolveu {}", who, ip),
+        (Kind::Decline, _) => tf!("{} recusou {}: o IP já está em uso na rede (bloqueado pelo servidor)", who, ip),
+        (Kind::Nak, _) => tf!("Pedido de {} recusado (renovação sem DISCOVER)", who),
+        (Kind::NoRange, _) => tf!("{} pediu IP pela interface {}, mas nenhuma faixa atende essa rede", who, ip),
+        (Kind::Blocked, _) => tf!("{} está bloqueado (reserva sem IP); pedido ignorado", who),
+        (Kind::ServerStop, _) => t("Servidor DHCP parado").to_string(),
+        (Kind::Info, _) => ev.text.clone(),
     }
 }
 
 pub fn fmt_secs(s: u32) -> String {
     match s {
-        0 => "tempo indeterminado".into(),
-        s if s % 86400 == 0 => format!("{} dia(s)", s / 86400),
+        0 => t("tempo indeterminado").into(),
+        s if s % 86400 == 0 => tf!("{} dia(s)", s / 86400),
         s if s % 3600 == 0 => format!("{}h", s / 3600),
         s if s >= 3600 => format!("{}h{:02}", s / 3600, (s % 3600) / 60),
         s if s % 60 == 0 => format!("{} min", s / 60),

@@ -1,6 +1,7 @@
 //! Regras de negócio sobre o `opendhcp.ini`: reservas (clientes estáticos), conjuntos de faixas
 //! (`[RANGE_SET]`) e opções globais. Toda entrada é validada antes de chegar ao arquivo.
 
+use crate::tf;
 use std::net::Ipv4Addr;
 
 use crate::ini::{normalize_mac, parse_ip, parse_range, IniDoc, Section};
@@ -134,7 +135,7 @@ pub fn all_ranges(doc: &IniDoc) -> Vec<(usize, Ipv4Addr, Ipv4Addr)> {
 fn clean(s: &str) -> Result<String, String> {
     let t = s.trim();
     if t.chars().any(|c| c.is_control()) {
-        return Err("valor com caractere inválido (quebra de linha ou controle)".into());
+        return Err(tf!("valor com caractere inválido (quebra de linha ou controle)"));
     }
     Ok(t.to_string())
 }
@@ -144,7 +145,7 @@ fn opt_ip(label: &str, s: &str) -> Result<Option<String>, String> {
     if t.is_empty() {
         return Ok(None);
     }
-    parse_ip(&t).map(|ip| Some(ip.to_string())).ok_or(format!("{label}: \"{t}\" não é um IPv4 válido"))
+    parse_ip(&t).map(|ip| Some(ip.to_string())).ok_or_else(|| tf!("{}: \"{}\" não é um IPv4 válido", label, t))
 }
 
 fn opt_ip_list(label: &str, s: &str) -> Result<Option<String>, String> {
@@ -154,16 +155,16 @@ fn opt_ip_list(label: &str, s: &str) -> Result<Option<String>, String> {
     }
     let mut out = Vec::new();
     for part in t.split([',', ' ', ';']).filter(|p| !p.is_empty()) {
-        out.push(parse_ip(part).ok_or(format!("{label}: \"{part}\" não é um IPv4 válido"))?.to_string());
+        out.push(parse_ip(part).ok_or_else(|| tf!("{}: \"{}\" não é um IPv4 válido", label, part))?.to_string());
     }
     Ok(Some(out.join(", ")))
 }
 
 fn opt_mask(s: &str) -> Result<Option<String>, String> {
-    let Some(m) = opt_ip("Máscara", s)? else { return Ok(None) };
+    let Some(m) = opt_ip(&tf!("Máscara"), s)? else { return Ok(None) };
     let bits = u32::from(m.parse::<Ipv4Addr>().unwrap());
     if bits.leading_ones() + bits.trailing_zeros() != 32 {
-        return Err(format!("Máscara: \"{m}\" não é uma máscara de rede válida"));
+        return Err(tf!("Máscara: \"{}\" não é uma máscara de rede válida", m));
     }
     Ok(Some(m))
 }
@@ -175,7 +176,7 @@ fn opt_lease(s: &str) -> Result<Option<String>, String> {
     }
     t.parse::<u32>()
         .map(|n| Some(n.to_string()))
-        .map_err(|_| format!("Tempo de lease: \"{t}\" precisa ser um número de segundos (0 = infinito)"))
+        .map_err(|_| tf!("Tempo de lease: \"{}\" precisa ser um número de segundos (0 = infinito)", t))
 }
 
 fn valid_hostname(h: &str) -> bool {
@@ -194,7 +195,7 @@ pub struct OptionsInput<'a> {
 
 fn write_opts(doc: &mut IniDoc, sec_name: &str, nth: usize, o: &OptionsInput) -> Result<(), String> {
     let mask = opt_mask(o.mask)?;
-    let router = opt_ip_list("Gateway", o.router)?;
+    let router = opt_ip_list(&tf!("Gateway"), o.router)?;
     let dns = opt_ip_list("DNS", o.dns)?;
     let lease = opt_lease(o.lease)?;
     for (key, val) in [(KEY_MASK, mask), (KEY_ROUTER, router), (KEY_DNS, dns), (KEY_LEASE, lease)] {
@@ -218,21 +219,21 @@ fn validate_reservation(
     input: &ReservationInput,
     editing: Option<usize>,
 ) -> Result<(String, Option<String>, Option<String>), String> {
-    let mac = normalize_mac(&clean(input.mac)?).ok_or("MAC inválido: use o formato 00:11:22:33:44:55")?;
+    let mac = normalize_mac(&clean(input.mac)?).ok_or_else(|| tf!("MAC inválido: use o formato 00:11:22:33:44:55"))?;
     let ip = opt_ip("IP", input.ip)?;
     let hostname = clean(input.hostname)?;
     if !hostname.is_empty() && !valid_hostname(&hostname) {
-        return Err("Nome do host: use só letras, números, ponto e hífen (até 63)".into());
+        return Err(tf!("Nome do host: use só letras, números, ponto e hífen (até 63)"));
     }
     for r in reservations(doc) {
         if Some(r.n) == editing {
             continue;
         }
         if r.mac == mac {
-            return Err(format!("Já existe uma reserva para o MAC {mac}"));
+            return Err(tf!("Já existe uma reserva para o MAC {}", mac));
         }
         if let Some(ipv) = ip.as_ref().filter(|v| r.ip.as_ref() == Some(*v)) {
-            return Err(format!("O IP {ipv} já está reservado para {}", r.mac));
+            return Err(tf!("O IP {} já está reservado para {}", ipv, r.mac));
         }
     }
     Ok((mac, ip, (!hostname.is_empty()).then_some(hostname)))
@@ -249,14 +250,14 @@ pub fn add_reservation(doc: &mut IniDoc, input: &ReservationInput) -> Result<Str
 }
 
 pub fn update_reservation(doc: &mut IniDoc, n: usize, input: &ReservationInput) -> Result<String, String> {
-    let current = reservations(doc).into_iter().find(|r| r.n == n).ok_or("Reserva não encontrada")?;
+    let current = reservations(doc).into_iter().find(|r| r.n == n).ok_or_else(|| tf!("Reserva não encontrada"))?;
     let (mac, ip, hostname) = validate_reservation(doc, input, Some(n))?;
     if mac != current.mac {
         // Troca só o cabeçalho; as demais opções do cliente ficam.
         doc.remove_section(&Section { end: current.section.header + 1, ..current.section.clone() });
         doc.insert_section_header(current.section.header, &mac);
     }
-    let sec = reservations(doc).into_iter().find(|r| r.n == n).ok_or("Reserva não encontrada")?.section;
+    let sec = reservations(doc).into_iter().find(|r| r.n == n).ok_or_else(|| tf!("Reserva não encontrada"))?.section;
     doc.set_value(&sec, "IP", Some(ip.as_deref().unwrap_or("")));
     let sec = reservations(doc).into_iter().find(|r| r.n == n).unwrap().section;
     doc.set_value(&sec, "HostName", hostname.as_deref());
@@ -264,7 +265,7 @@ pub fn update_reservation(doc: &mut IniDoc, n: usize, input: &ReservationInput) 
 }
 
 pub fn delete_reservation(doc: &mut IniDoc, n: usize) -> Result<String, String> {
-    let r = reservations(doc).into_iter().find(|r| r.n == n).ok_or("Reserva não encontrada")?;
+    let r = reservations(doc).into_iter().find(|r| r.n == n).ok_or_else(|| tf!("Reserva não encontrada"))?;
     doc.remove_section(&r.section);
     Ok(r.mac)
 }
@@ -280,13 +281,13 @@ fn parse_ranges_text(text: &str) -> Result<Vec<(Ipv4Addr, Ipv4Addr)>, String> {
     let mut out = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let line = clean(line)?;
-        let r = parse_range(&line.replace(' ', "")).ok_or(format!(
-            "Faixa \"{line}\" inválida: use INÍCIO-FIM, por exemplo 192.168.0.100-192.168.0.200"
-        ))?;
+        let r = parse_range(&line.replace(' ', "")).ok_or_else(|| {
+            tf!("Faixa \"{}\" inválida: use INÍCIO-FIM, por exemplo 192.168.0.100-192.168.0.200", line)
+        })?;
         out.push(r);
     }
     if out.is_empty() {
-        return Err("Informe ao menos uma faixa".into());
+        return Err(tf!("Informe ao menos uma faixa"));
     }
     Ok(out)
 }
@@ -295,7 +296,7 @@ fn check_overlaps(doc: &IniDoc, new: &[(Ipv4Addr, Ipv4Addr)], editing: Option<us
     let others: Vec<(Ipv4Addr, Ipv4Addr)> =
         all_ranges(doc).into_iter().filter(|(n, ..)| Some(*n) != editing).map(|(_, a, b)| (a, b)).collect();
     if others.len() + new.len() > MAX_RANGES {
-        return Err(format!("O servidor aceita no máximo {MAX_RANGES} faixas no total"));
+        return Err(tf!("O servidor aceita no máximo {} faixas no total", MAX_RANGES));
     }
     let all: Vec<(Ipv4Addr, Ipv4Addr)> = others.iter().chain(new.iter()).copied().collect();
     for (i, (a1, b1)) in new.iter().enumerate() {
@@ -304,7 +305,7 @@ fn check_overlaps(doc: &IniDoc, new: &[(Ipv4Addr, Ipv4Addr)], editing: Option<us
                 continue;
             }
             if u32::from(*a1) <= u32::from(*b2) && u32::from(*a2) <= u32::from(*b1) {
-                return Err(format!("A faixa {a1}-{b1} se sobrepõe a {a2}-{b2}"));
+                return Err(tf!("A faixa {}-{} se sobrepõe a {}-{}", a1, b1, a2, b2));
             }
         }
     }
@@ -345,7 +346,7 @@ fn doc_line_blank(doc: &IniDoc, i: usize) -> bool {
 }
 
 pub fn update_range_set(doc: &mut IniDoc, n: usize, input: &RangeSetInput) -> Result<(), String> {
-    let sec = doc.sections_named("RANGE_SET").get(n).cloned().ok_or("Conjunto de faixas não encontrado")?;
+    let sec = doc.sections_named("RANGE_SET").get(n).cloned().ok_or_else(|| tf!("Conjunto de faixas não encontrado"))?;
     let ranges = parse_ranges_text(input.ranges)?;
     check_overlaps(doc, &ranges, Some(n))?;
     let values: Vec<String> = ranges.iter().map(|(a, b)| format!("{a}-{b}")).collect();
@@ -354,7 +355,7 @@ pub fn update_range_set(doc: &mut IniDoc, n: usize, input: &RangeSetInput) -> Re
 }
 
 pub fn delete_range_set(doc: &mut IniDoc, n: usize) -> Result<(), String> {
-    let sec = doc.sections_named("RANGE_SET").get(n).cloned().ok_or("Conjunto de faixas não encontrado")?;
+    let sec = doc.sections_named("RANGE_SET").get(n).cloned().ok_or_else(|| tf!("Conjunto de faixas não encontrado"))?;
     doc.remove_section(&sec);
     Ok(())
 }
@@ -364,7 +365,7 @@ pub fn delete_range_set(doc: &mut IniDoc, n: usize) -> Result<(), String> {
 pub fn update_globals(doc: &mut IniDoc, domain: &str, opts: &OptionsInput) -> Result<(), String> {
     let domain = clean(domain)?;
     if !domain.is_empty() && !valid_hostname(&domain) {
-        return Err("Domínio: use só letras, números, ponto e hífen".into());
+        return Err(tf!("Domínio: use só letras, números, ponto e hífen"));
     }
     if doc.sections_named("GLOBAL_OPTIONS").is_empty() {
         let at = doc.sections().into_iter().find(|s| normalize_mac(&s.name).is_some()).map(|s| s.header);

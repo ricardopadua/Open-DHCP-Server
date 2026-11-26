@@ -8,6 +8,8 @@ mod config;
 mod dhcp;
 mod events;
 mod fsutil;
+mod i18n;
+mod i18n_table;
 mod ini;
 mod leases;
 mod monitor;

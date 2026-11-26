@@ -57,8 +57,7 @@
   }
 
   document.addEventListener("keydown", (ev) => {
-    const notif = $("#notif");
-    if (ev.key === "Escape" && notif && notif.open) notif.open = false;
+    if (ev.key === "Escape") $$("details.notif[open], details.menu[open]").forEach((d) => (d.open = false));
   });
 
   document.addEventListener("input", (ev) => {
@@ -79,9 +78,10 @@
     }
     const close = ev.target.closest("[data-close]");
     if (close) close.closest(".alert").hidden = true;
-    // fecha a lista de notificações ao clicar fora dela
-    const notif = $("#notif");
-    if (notif && notif.open && !ev.target.closest("#notif")) notif.open = false;
+    // fecha as listas suspensas (notificações, idioma) ao clicar fora delas
+    $$("details.notif[open], details.menu[open]").forEach((d) => {
+      if (!d.contains(ev.target)) d.open = false;
+    });
     const tog = ev.target.closest("[data-toggle=side]");
     if (tog) document.body.classList.toggle("side-open");
   });

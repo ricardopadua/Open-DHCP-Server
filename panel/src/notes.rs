@@ -5,6 +5,8 @@
 
 use chrono::{DateTime, Local};
 
+use crate::i18n::Msg;
+
 /// Botão opcional da notificação.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoteAction {
@@ -21,13 +23,14 @@ pub struct Alert {
     /// Muda quando há uma ocorrência nova da mesma situação (ex.: último evento do log).
     pub rev: String,
     pub tone: &'static str,
-    pub text: String,
+    /// Traduzida na hora de mostrar, no idioma de quem vê.
+    pub msg: Msg,
     pub action: Option<NoteAction>,
 }
 
 impl Alert {
-    pub fn new(key: impl Into<String>, tone: &'static str, text: impl Into<String>) -> Self {
-        Self { key: key.into(), rev: String::new(), tone, text: text.into(), action: None }
+    pub fn new(key: impl Into<String>, tone: &'static str, msg: impl Into<Msg>) -> Self {
+        Self { key: key.into(), rev: String::new(), tone, msg: msg.into(), action: None }
     }
 }
 
@@ -111,7 +114,7 @@ mod tests {
     use super::*;
 
     fn a(key: &str, rev: &str) -> Alert {
-        Alert { rev: rev.into(), ..Alert::new(key, "bad", key) }
+        Alert { rev: rev.into(), ..Alert::new(key, "bad", "x") }
     }
 
     #[test]
