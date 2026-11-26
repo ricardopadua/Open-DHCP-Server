@@ -9,6 +9,7 @@ mod devices;
 mod dhcp;
 mod events;
 mod fsutil;
+mod history;
 mod i18n;
 mod i18n_table;
 mod ini;
@@ -85,7 +86,15 @@ async fn serve(path: PathBuf) -> anyhow::Result<()> {
             "o painel está aberto na rede sem HTTPS (secure_cookie = false); prefira 127.0.0.1 atrás de um proxy com TLS"
         );
     }
-    let monitor = monitor::Monitor::new(cfg.clone());
+    let history_path = cfg.data_dir.join("history.sqlite");
+    let history = match history::History::open(&history_path) {
+        Ok(h) => Some(std::sync::Arc::new(h)),
+        Err(e) => {
+            tracing::error!(file = %history_path.display(), error = %e, "não consegui abrir o histórico; seguindo só com a memória");
+            None
+        }
+    };
+    let monitor = monitor::Monitor::new(cfg.clone(), history);
     tokio::spawn(monitor.clone().run());
     let app = web::router(cfg, monitor, path);
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("não consegui abrir {listen}"))?;

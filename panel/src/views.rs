@@ -220,6 +220,11 @@ fn recent(snap: &Snapshot, kind: Kind, mins: i64, now: NaiveDateTime) -> Vec<&Ev
     snap.events.iter().filter(|e| e.kind == kind && e.ts.is_some_and(|t| t >= since)).collect()
 }
 
+/// Identifica um evento de forma estável (vale depois de reiniciar o painel, ao contrário de `seq`).
+fn event_rev(e: &Event) -> String {
+    format!("{} {}", e.ts.map(|t| t.to_string()).unwrap_or_default(), e.mac.as_deref().unwrap_or(""))
+}
+
 pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
     let mut out = Vec::new();
     match snap.status {
@@ -253,7 +258,7 @@ pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
     let nr = recent(snap, Kind::NoRange, 15, now_l);
     if let Some(last) = nr.last() {
         out.push(Alert {
-            rev: last.seq.to_string(),
+            rev: event_rev(last),
             action: Some(NoteAction::Link("/activity", n_("Ver atividade"))),
             ..Alert::new(
                 "norange",
@@ -270,7 +275,7 @@ pub fn alerts(snap: &Snapshot, now: i64, now_l: NaiveDateTime) -> Vec<Alert> {
     let dc = recent(snap, Kind::Decline, 15, now_l);
     if let Some(last) = dc.last() {
         out.push(Alert {
-            rev: last.seq.to_string(),
+            rev: event_rev(last),
             action: Some(NoteAction::Link("/activity", n_("Ver atividade"))),
             ..Alert::new(
                 "decline",
@@ -786,24 +791,74 @@ pub fn frag_timeline(snap: &Snapshot, limit: usize) -> Markup {
 
 // ---------- atividade ----------
 
-pub fn activity_body(snap: &Snapshot) -> Markup {
+fn feed_filters() -> Markup {
+    html! {
+        div.chips data-chips="#feed-table" {
+            button.chip.active type="button" data-kind="" { (t("Todos")) }
+            button.chip type="button" data-kind="ok" { (t("Entregues")) }
+            button.chip type="button" data-kind="renew" { (t("Renovações")) }
+            button.chip type="button" data-kind="warn" { (t("Liberados")) }
+            button.chip type="button" data-kind="bad" { (t("Problemas")) }
+        }
+        label.search { (icon("search")) input type="search" placeholder=(t("Filtrar por MAC, IP ou nome")) data-filter="#feed-table" aria-label=(t("Filtrar")); }
+    }
+}
+
+/// Navegação entre dias do histórico (anterior, calendário, próximo, hoje).
+pub fn day_nav(day: chrono::NaiveDate, today: chrono::NaiveDate, first: Option<chrono::NaiveDate>) -> Markup {
+    let first = first.unwrap_or(today).min(today);
+    let href = |d: chrono::NaiveDate| if d >= today { "/activity".to_string() } else { format!("/activity?day={d}") };
+    html! {
+        form.day-nav method="get" action="/activity" {
+            @if day > first {
+                a.icon-btn href=(href(day.pred_opt().unwrap_or(day))) title=(t("Dia anterior")) aria-label=(t("Dia anterior")) { "‹" }
+            }
+            input type="date" name="day" value=(day) min=(first) max=(today) data-autosubmit aria-label=(t("Dia"));
+            @if day < today {
+                a.icon-btn href=(href(day.succ_opt().unwrap_or(day))) title=(t("Próximo dia")) aria-label=(t("Próximo dia")) { "›" }
+                a.btn.light.small href="/activity" { (t("Hoje")) }
+            }
+        }
+    }
+}
+
+pub fn activity_body(snap: &Snapshot, nav: Markup) -> Markup {
     html! {
         section.grid.kpis #act-stats { (frag_activity_stats(snap)) }
         section.card {
             div.card-head {
                 h2.card-title { (t("Eventos do servidor")) }
+                (nav)
                 div.row {
-                    div.chips data-chips="#feed-table" {
-                        button.chip.active type="button" data-kind="" { (t("Todos")) }
-                        button.chip type="button" data-kind="ok" { (t("Entregues")) }
-                        button.chip type="button" data-kind="renew" { (t("Renovações")) }
-                        button.chip type="button" data-kind="warn" { (t("Liberados")) }
-                        button.chip type="button" data-kind="bad" { (t("Problemas")) }
-                    }
-                    label.search { (icon("search")) input type="search" placeholder=(t("Filtrar por MAC, IP ou nome")) data-filter="#feed-table" aria-label=(t("Filtrar")); }
+                    (feed_filters())
                 }
             }
             div #feed { (frag_feed(snap)) }
+        }
+    }
+}
+
+/// Um dia anterior, lido do histórico (sem atualização ao vivo). `events`: do mais novo ao mais antigo.
+pub fn activity_day_body(events: &[Event], day: chrono::NaiveDate, nav: Markup) -> Markup {
+    let count = |ks: &[Kind]| events.iter().filter(|e| ks.contains(&e.kind)).count();
+    let refs: Vec<&Event> = events.iter().collect();
+    html! {
+        section.card {
+            div.card-head {
+                h2.card-title { (tf!("Eventos de {}", day.format(i18n::date_fmt(DateStyle::Day)))) }
+                (nav)
+                div.row { (feed_filters()) }
+            }
+            p.muted.small.day-summary {
+                (tf!("{} evento(s): {} IP(s) entregue(s), {} renovação(ões), {} liberado(s), {} problema(s).",
+                    events.len(), count(&[Kind::Allot]), count(&[Kind::Renew]), count(&[Kind::Release]),
+                    count(&[Kind::NoRange, Kind::Decline, Kind::Nak])))
+            }
+            @if events.is_empty() {
+                p.empty { (t("Nenhum evento guardado neste dia.")) }
+            } @else {
+                (feed_table(&refs, now_local(), true))
+            }
         }
     }
 }
@@ -829,22 +884,30 @@ pub fn frag_feed(snap: &Snapshot) -> Markup {
         } @else if snap.events.is_empty() {
             p.empty { (tm("Nenhum evento no log ainda. Com {} o servidor registra IPs entregues, renovações e liberações; com {}, também as ofertas.", &[html! { code { "LogLevel=Normal" } }, html! { code { "All" } }])) }
         } @else {
-            div.table-wrap {
-                table #feed-table {
-                    thead { tr { th { (t("Quando")) } th { (t("Evento")) } th { (t("Descrição")) } th { "MAC" } th { "IP" } } }
-                    tbody {
-                        @for e in snap.events.iter().rev().take(400) {
-                            @let kind_key = if e.kind == Kind::Renew { "renew" } else { e.kind.tone() };
-                            tr data-kind=(kind_key) {
-                                td.nowrap title=[e.ts.map(|t| t.format(i18n::date_fmt(DateStyle::Full)).to_string())] {
-                                    (e.ts.map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default())
-                                    " " span.muted.small { (ago(e.ts, now)) }
-                                }
-                                td { (kind_tag(e.kind)) }
-                                td { (events::describe(e)) }
-                                td.mono { @if let Some(m) = &e.mac { a.dev-link href={"/devices/" (m)} { (m) } } }
-                                td.mono { @if !matches!(e.kind, Kind::NoRange) { (e.ip.as_deref().unwrap_or("")) } }
+            @let recent: Vec<&Event> = snap.events.iter().rev().take(400).collect();
+            (feed_table(&recent, now, false))
+        }
+    }
+}
+
+/// Tabela de eventos (do mais novo ao mais antigo). `past`: dia anterior, sem o "há X min".
+fn feed_table(events: &[&Event], now: NaiveDateTime, past: bool) -> Markup {
+    html! {
+        div.table-wrap {
+            table #feed-table {
+                thead { tr { th { (t("Quando")) } th { (t("Evento")) } th { (t("Descrição")) } th { "MAC" } th { "IP" } } }
+                tbody {
+                    @for e in events {
+                        @let kind_key = if e.kind == Kind::Renew { "renew" } else { e.kind.tone() };
+                        tr data-kind=(kind_key) {
+                            td.nowrap title=[e.ts.map(|t| t.format(i18n::date_fmt(DateStyle::Full)).to_string())] {
+                                (e.ts.map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default())
+                                @if !past { " " span.muted.small { (ago(e.ts, now)) } }
                             }
+                            td { (kind_tag(e.kind)) }
+                            td { (events::describe(e)) }
+                            td.mono { @if let Some(m) = &e.mac { a.dev-link href={"/devices/" (m)} { (m) } } }
+                            td.mono { @if !matches!(e.kind, Kind::NoRange) { (e.ip.as_deref().unwrap_or("")) } }
                         }
                     }
                 }

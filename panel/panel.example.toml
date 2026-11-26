@@ -19,8 +19,11 @@ log_file = "/opt/opendhcp/log/opendhcp%Y%m%d.log"
 backup_dir = "/var/lib/opendhcp-panel/backups"
 backups_keep = 30
 
-# Dados do próprio painel: apelidos e anotações dos dispositivos (devices.json).
+# Dados do próprio painel: apelidos e anotações dos dispositivos (devices.json) e o histórico
+# de eventos e notificações fechadas (history.sqlite).
 data_dir = "/var/lib/opendhcp-panel"
+# Dias de eventos guardados no histórico (0 = sem limite).
+history_days = 90
 
 # Lista de fabricantes por MAC. Sem esta linha, o painel procura nos caminhos comuns
 # (/usr/share/hwdata/oui.txt, /usr/share/ieee-data/oui.txt, /usr/share/misc/oui.txt,

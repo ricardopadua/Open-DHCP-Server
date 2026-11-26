@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::events::{self, Event};
 use crate::ini::IniDoc;
 use crate::leases::{self, Lease};
+use crate::history::History;
 use crate::i18n::Msg;
 use crate::msg;
 use crate::notes::{self, Alert, Note};
@@ -90,6 +91,9 @@ struct Inner {
     tick: u64,
     last_bump: Instant,
     note_id: u64,
+    /// Notificações fechadas (chave → rev), guardadas no histórico para valer após reiniciar.
+    remembered: HashMap<String, String>,
+    last_prune: Option<Instant>,
 }
 
 pub struct Monitor {
@@ -99,6 +103,7 @@ pub struct Monitor {
     inner: tokio::sync::Mutex<Inner>,
     /// Alertas que vêm do painel e não dos arquivos (senha padrão, reinício pendente).
     extra: std::sync::Mutex<Vec<Alert>>,
+    history: Option<Arc<History>>,
 }
 
 fn sig(path: &std::path::Path) -> Sig {
@@ -106,8 +111,9 @@ fn sig(path: &std::path::Path) -> Sig {
 }
 
 impl Monitor {
-    pub fn new(cfg: Config) -> Arc<Self> {
+    pub fn new(cfg: Config, history: Option<Arc<History>>) -> Arc<Self> {
         let (tx, _) = watch::channel(0);
+        let remembered = history.as_ref().map(|h| h.dismissed()).unwrap_or_default();
         Arc::new(Self {
             cfg,
             snap: RwLock::new(Arc::new(Snapshot::empty())),
@@ -122,9 +128,16 @@ impl Monitor {
                 tick: 0,
                 last_bump: Instant::now(),
                 note_id: 0,
+                remembered,
+                last_prune: None,
             }),
             extra: std::sync::Mutex::new(Vec::new()),
+            history,
         })
+    }
+
+    pub fn history(&self) -> Option<&History> {
+        self.history.as_deref()
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -163,10 +176,17 @@ impl Monitor {
 
     /// Fecha uma notificação (ou todas, com `None`).
     pub async fn dismiss(&self, id: Option<u64>) {
-        let _inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let old = self.snapshot();
         let mut next: Snapshot = (*old).clone();
         if notes::dismiss(&mut next.notes, id) {
+            // fechadas e ainda ativas: lembrar depois de reiniciar o painel
+            for n in next.notes.iter().filter(|n| n.dismissed && n.active() && id.is_none_or(|id| n.id == id)) {
+                inner.remembered.insert(n.alert.key.clone(), n.alert.rev.clone());
+                if let Some(h) = &self.history {
+                    h.set_dismissed(&n.alert.key, &n.alert.rev);
+                }
+            }
             next.version = old.version + 1;
             let v = next.version;
             *self.snap.write().unwrap() = Arc::new(next);
@@ -232,7 +252,16 @@ impl Monitor {
         // log
         if let Some(pattern) = &self.cfg.log_file {
             let new_events = self.read_log(&mut inner, pattern, &mut next.log);
-            if !new_events.is_empty() {
+            if let (Some(h), false) = (&self.history, new_events.is_empty()) {
+                if let Err(e) = h.insert(&new_events) {
+                    tracing::error!(error = %e, "falha ao gravar eventos no histórico");
+                }
+            }
+            if let (Some(h), 0) = (&self.history, old.version) {
+                // ao iniciar, a memória vem do histórico (inclui o que veio de execuções anteriores)
+                next.events = h.recent(MAX_EVENTS).into();
+                changed = true;
+            } else if !new_events.is_empty() {
                 next.events.extend(new_events);
                 while next.events.len() > MAX_EVENTS {
                     next.events.pop_front();
@@ -252,8 +281,34 @@ impl Monitor {
         let mut current = crate::views::alerts(&next, crate::views::now_ts(), crate::views::now_local());
         current.extend(self.extra.lock().unwrap().iter().cloned());
         let mut id = inner.note_id;
-        changed |= notes::sync(&mut next.notes, current, chrono::Local::now(), &mut id);
+        let notes_changed = notes::sync(&mut next.notes, current, chrono::Local::now(), &mut id, &inner.remembered);
         inner.note_id = id;
+        if notes_changed {
+            changed = true;
+            // Esquece só o que estava ativo e acabou (não o que ainda nem apareceu: na
+            // primeira leitura alguns alertas do painel ainda não foram registrados).
+            let was_active = |k: &str| old.notes.iter().any(|n| n.active() && n.alert.key == k);
+            let is_active = |k: &str| next.notes.iter().any(|n| n.active() && n.alert.key == k);
+            let ended: Vec<String> = inner.remembered.keys().filter(|k| was_active(k) && !is_active(k)).cloned().collect();
+            if !ended.is_empty() {
+                inner.remembered.retain(|k, _| !ended.contains(k));
+                if let Some(h) = &self.history {
+                    let keep: Vec<String> = inner.remembered.keys().cloned().collect();
+                    h.forget_dismissed_except(&keep);
+                }
+            }
+        }
+
+        // limpeza do histórico (ao iniciar e uma vez por dia)
+        if let Some(h) = &self.history {
+            if inner.last_prune.is_none_or(|t| t.elapsed() >= Duration::from_secs(86400)) {
+                inner.last_prune = Some(Instant::now());
+                let n = h.prune(self.cfg.history_days, chrono::Local::now().naive_local());
+                if n > 0 {
+                    tracing::info!(removed = n, days = self.cfg.history_days, "eventos antigos apagados do histórico");
+                }
+            }
+        }
 
         // destaques que venceram e relógio relativo ("em 3 min") a cada 30 s
         let before = next.fresh.len();
@@ -387,7 +442,7 @@ restart = ["true"]
         std::fs::write(dir.path().join("o.ini"), "[RANGE_SET]\nDHCPRange=10.0.0.1-10.0.0.9\n").unwrap();
         let log = dir.path().join(chrono::Local::now().format("log%Y.log").to_string());
         std::fs::write(&log, "[26-Nov-26 03:30:48] Host aa:bb:cc:dd:ee:01 (a) allotted 10.0.0.2 for 60 seconds\n").unwrap();
-        let m = Monitor::new(cfg(dir.path()));
+        let m = Monitor::new(cfg(dir.path()), None);
         m.tick(false).await;
         let s = m.snapshot();
         assert_eq!(s.status, Status::Running);

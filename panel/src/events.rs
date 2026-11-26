@@ -47,6 +47,39 @@ impl Kind {
         })
     }
 
+    /// Nome fixo para guardar no histórico.
+    pub fn code(self) -> &'static str {
+        match self {
+            Kind::Allot => "allot",
+            Kind::Renew => "renew",
+            Kind::Offer => "offer",
+            Kind::Release => "release",
+            Kind::Decline => "decline",
+            Kind::Nak => "nak",
+            Kind::NoRange => "norange",
+            Kind::Blocked => "blocked",
+            Kind::ServerStop => "stop",
+            Kind::Info => "info",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Kind {
+        [
+            Kind::Allot,
+            Kind::Renew,
+            Kind::Offer,
+            Kind::Release,
+            Kind::Decline,
+            Kind::Nak,
+            Kind::NoRange,
+            Kind::Blocked,
+            Kind::ServerStop,
+        ]
+        .into_iter()
+        .find(|k| k.code() == s)
+        .unwrap_or(Kind::Info)
+    }
+
     /// Classe de cor do selo (ok/warn/bad ou neutro).
     pub fn tone(self) -> &'static str {
         match self {

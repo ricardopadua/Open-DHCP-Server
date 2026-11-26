@@ -539,3 +539,10 @@ dl.opts.dev-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .alert.row > form[data-ajax], .alert.row > [data-close] { grid-column: 3; grid-row: 1; }
   .alert.row > a.btn, .alert.row > form:not([data-ajax]) { grid-column: 2; grid-row: 2; justify-self: start; margin-left: 0; }
 }
+
+/* ---------- histórico por dia ---------- */
+.day-nav { display: flex; align-items: center; gap: 0.4rem; }
+.day-nav input[type="date"] { width: auto; padding: 0.35rem 0.55rem; font-size: 0.8rem; }
+.day-nav .icon-btn { text-decoration: none; font-size: 1.1rem; line-height: 1; }
+.day-summary { margin: 0 0 1rem; }
+html.dark input[type="date"] { color-scheme: dark; }

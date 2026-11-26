@@ -18,7 +18,7 @@ Rust. É um programa separado: **o servidor DHCP (`opendhcpd`) não muda**. O pa
 | Tela | O que faz |
 |---|---|
 | Visão geral | Cartão do serviço (Iniciar/Parar/Reiniciar), indicadores, gráfico de eventos das últimas 2 h, uso das faixas, ocupação geral e atividade recente |
-| Atividade | Feed ao vivo do log do servidor: IP entregue, renovação, oferta, liberação, conflito, recusa, pedido sem faixa; filtros por tipo e texto |
+| Atividade | Feed ao vivo do log do servidor: IP entregue, renovação, oferta, liberação, conflito, recusa, pedido sem faixa; filtros por tipo e texto. **Dias anteriores** pelo calendário (histórico em disco) |
 | Leases ativos | Dispositivos com IP agora, com destaque para os **novos** e **renovados**, fabricante pelo MAC (ou "MAC aleatório") e apelido; **Fixar IP** (vira reserva) e **Liberar** |
 | Dispositivo | Clicando num MAC: fabricante, situação atual, reserva, histórico de eventos daquele aparelho, e **apelido e anotações** (guardados em `data_dir/devices.json`, fora do `.ini`) |
 | Reservas | IP fixo por MAC (`[00:11:22:33:44:55]` + `IP=`), nome do host, bloqueio de dispositivo, se está com IP agora. Botão **IP livre** sugere o primeiro IP disponível; aviso (e recusa ao salvar) se o IP estiver com outro dispositivo. **Importar/exportar CSV** (`mac,ip,hostname`, tudo ou nada) |
@@ -102,6 +102,10 @@ Para testar sem root/DHCP real, aponte os comandos de `[service]` para um script
 serviço e use uma cópia do `opendhcp.ini`; um script que escreva linhas no log e regrave o
 arquivo de estado (no formato acima) faz a tela se mexer como num servidor de verdade.
 
+**Histórico:** os eventos do log ficam num SQLite em `data_dir/history.sqlite` (por padrão, 90
+dias; `history_days`), sem duplicar quando o mesmo trecho do log é relido. Ele alimenta os dias
+anteriores da tela Atividade e o histórico de cada dispositivo, e guarda as notificações fechadas
+para não voltarem quando o painel reinicia.
+
 Limitações atuais: o layout do arquivo de estado é o do Linux 64 bits (x86_64/aarch64); o painel
-não edita `[LISTEN_ON]`, `[REPLICATION_SERVERS]` nem filtros de faixa; o histórico de eventos
-fica em memória (os últimos 2000).
+não edita `[LISTEN_ON]`, `[REPLICATION_SERVERS]` nem filtros de faixa.

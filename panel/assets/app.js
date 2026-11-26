@@ -297,6 +297,12 @@
     }
   });
 
+  // ---------- atividade: escolher o dia no calendário já abre o dia ----------
+  document.addEventListener("change", (ev) => {
+    const el = ev.target;
+    if (el.matches && el.matches("[data-autosubmit]") && el.value) el.form.submit();
+  });
+
   // ---------- importar CSV: o arquivo escolhido vai para a caixa de texto ----------
   document.addEventListener("change", (ev) => {
     const input = ev.target;

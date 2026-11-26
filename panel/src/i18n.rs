@@ -94,6 +94,8 @@ pub enum DateStyle {
     ShortSecs,
     /// com ano e segundos
     Full,
+    /// só a data, com ano ("26/11/2026", "Nov 26, 2026")
+    Day,
 }
 
 impl Lang {
@@ -103,6 +105,8 @@ impl Lang {
             (Lang::En, DateStyle::Short) => "%b %-d, %H:%M",
             (Lang::En, DateStyle::ShortSecs) => "%b %-d, %H:%M:%S",
             (Lang::En, DateStyle::Full) => "%b %-d, %Y %H:%M:%S",
+            (Lang::En, DateStyle::Day) => "%b %-d, %Y",
+            (_, DateStyle::Day) => "%d/%m/%Y",
             (_, DateStyle::Short) => "%d/%m %H:%M",
             (_, DateStyle::ShortSecs) => "%d/%m %H:%M:%S",
             (_, DateStyle::Full) => "%d/%m/%Y %H:%M:%S",
