@@ -1,4 +1,4 @@
-# Open DHCP Server, with a web panel and a desktop app
+# Open DHCP Server
 
 [Open DHCP Server](http://dhcpserver.sourceforge.net/) is a free, open-source DHCP server by
 **Achal Dhir** (GNU GPL v2). This repository is a fork of
