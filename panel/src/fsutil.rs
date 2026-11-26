@@ -21,6 +21,34 @@ fn tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Backup de um arquivo: nome no diretório, quando foi feito e tamanho.
+pub struct BackupFile {
+    pub name: String,
+    pub when: Option<chrono::NaiveDateTime>,
+    pub size: u64,
+}
+
+/// Backups de `path` em `dir`, do mais novo para o mais antigo.
+pub fn list_backups(path: &Path, dir: &Path) -> Vec<BackupFile> {
+    let base = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let prefix = format!("{base}.");
+    let mut out: Vec<BackupFile> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let stamp = name.strip_prefix(&prefix)?.to_string();
+                    let meta = e.metadata().ok().filter(|m| m.is_file())?;
+                    let when = chrono::NaiveDateTime::parse_from_str(&stamp, "%Y%m%d-%H%M%S%.3f").ok();
+                    Some(BackupFile { name, when, size: meta.len() })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    out
+}
+
 /// Copia o arquivo para `<dir_backup>/<nome>.<AAAAmmdd-HHMMSS>` e mantém só os `keep` mais novos.
 pub fn backup(path: &Path, dir: &Path, keep: usize) -> std::io::Result<Option<PathBuf>> {
     if !path.exists() {

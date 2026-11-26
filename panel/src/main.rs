@@ -6,6 +6,7 @@
 mod auth;
 mod config;
 mod devices;
+mod diff;
 mod dhcp;
 mod events;
 mod fsutil;

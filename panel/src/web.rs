@@ -112,6 +112,9 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         .route("/reservations.csv", get(reservations_csv))
         .route("/reservations/import", get(import_page).post(import_save))
         .route("/devices/{mac}", get(device_page).post(device_update))
+        .route("/backups", get(backups_page))
+        .route("/backups/{name}", get(backup_view))
+        .route("/backups/{name}/restore", post(backup_restore))
         .route("/reservations/new", get(reservation_new).post(reservation_create))
         .route("/reservations/{n}/edit", get(reservation_edit).post(reservation_update))
         .route("/reservations/{n}/delete", post(reservation_delete))
@@ -223,7 +226,7 @@ fn page(app: &App, ctx: &Ctx, title: &str, nav: &str, live: &str, body: Markup) 
     let snap = app.monitor.snapshot();
     let here = match nav {
         "dashboard" => "/".to_string(),
-        "activity" | "leases" | "reservations" | "ranges" | "options" | "account" => format!("/{nav}"),
+        "activity" | "leases" | "reservations" | "ranges" | "options" | "account" | "backups" => format!("/{nav}"),
         _ => "/".to_string(),
     };
     views::shell(
@@ -256,12 +259,16 @@ fn rev_of(bytes: &[u8]) -> String {
 fn load_ini(path: &Path) -> Result<Loaded, String> {
     let bytes = std::fs::read(path).map_err(|e| tf!("Não consegui ler {}: {}", path.display(), e))?;
     let rev = rev_of(&bytes);
-    // O .ini original pode ter acentos em Latin-1; nesse caso gravamos de volta em Latin-1.
-    let (text, latin1) = match String::from_utf8(bytes) {
+    let (text, latin1) = decode_ini(bytes);
+    Ok(Loaded { doc: IniDoc::parse(&text), rev, latin1 })
+}
+
+/// O .ini original pode ter acentos em Latin-1; nesse caso gravamos de volta em Latin-1.
+fn decode_ini(bytes: Vec<u8>) -> (String, bool) {
+    match String::from_utf8(bytes) {
         Ok(t) => (t, false),
         Err(e) => (e.into_bytes().iter().map(|b| *b as char).collect(), true),
-    };
-    Ok(Loaded { doc: IniDoc::parse(&text), rev, latin1 })
+    }
 }
 
 /// Aplica `change` ao .ini sob trava, conferindo se ninguém mudou o arquivo desde que o
@@ -412,9 +419,23 @@ async fn logout(State(app): State<Shared>, ctx: Ctx, jar: CookieJar, Form(f): Fo
 
 // ---------- monitoramento ----------
 
-async fn dashboard(State(app): State<Shared>, ctx: Ctx) -> Response {
+#[derive(serde::Deserialize)]
+struct PeriodQuery {
+    period: Option<String>,
+}
+
+async fn dashboard(State(app): State<Shared>, ctx: Ctx, Query(q): Query<PeriodQuery>) -> Response {
     let snap = app.monitor.snapshot();
-    let body = views::dashboard_body(&snap, &ctx.s.csrf);
+    let occupancy = app.monitor.history().map(|h| {
+        let now = views::now_local();
+        let period = if q.period.as_deref() == Some("7d") { views::Period::Week } else { views::Period::Day };
+        let points = match period {
+            views::Period::Day => h.occupancy(now - chrono::Duration::hours(24), false),
+            views::Period::Week => h.occupancy(now - chrono::Duration::days(7), true),
+        };
+        (views::occupancy_chart(&points, period, now), period)
+    });
+    let body = views::dashboard_body(&snap, &ctx.s.csrf, occupancy);
     page(&app, &ctx, n_("Visão geral"), "dashboard", "dashboard", body).into_response()
 }
 
@@ -448,7 +469,7 @@ async fn activity_page(State(app): State<Shared>, ctx: Ctx, Query(q): Query<DayQ
 
 async fn leases_page(State(app): State<Shared>, ctx: Ctx) -> Response {
     let snap = app.monitor.snapshot();
-    let body = views::leases_body(&snap, &ctx.s.csrf, &app.cfg.state_file.display().to_string(), app.dev());
+    let body = views::leases_body(&snap, &ctx.s.csrf, &app.cfg.state_file, app.dev());
     page(&app, &ctx, n_("Leases ativos"), "leases", "leases", body).into_response()
 }
 
@@ -914,7 +935,7 @@ fn device_body(app: &App, ctx: &Ctx, mac: &str, info: &DeviceInfo, err: Option<&
                 label.span2 { (t("Anotações"))
                     textarea name="notes" rows="3" maxlength=(MAX_NOTES) placeholder=(t("Onde fica, quem usa, número de patrimônio...")) { (info.notes) } }
             }
-            p.muted.small { (tf!("Guardado no painel ({}), não no opendhcp.ini.", app.devices.path().display())) }
+            p.muted.small { (tm("Guardado no painel ({}), não no opendhcp.ini.", &[views::path_code(app.devices.path())])) }
             div.form-actions { button.btn.primary type="submit" { (icon("check")) (t("Salvar")) } }
         }
         section.card {
@@ -1472,6 +1493,160 @@ async fn dismiss_note(State(app): State<Shared>, ctx: Ctx, headers: axum::http::
         StatusCode::NO_CONTENT.into_response()
     } else {
         Redirect::to("/").into_response()
+    }
+}
+
+// ---------- backups do .ini ----------
+
+/// Caminho de um backup pelo nome, só se for mesmo um backup do .ini (sem `/`, `..` etc.).
+fn backup_path(app: &App, name: &str) -> Option<PathBuf> {
+    let base = app.cfg.ini_file.file_name()?.to_string_lossy().into_owned();
+    let ok = name.starts_with(&format!("{base}.")) && !name.contains(['/', '\\']) && !name.contains("..");
+    let path = app.cfg.backup_dir.join(name);
+    (ok && path.is_file()).then_some(path)
+}
+
+fn backup_when(b: &crate::fsutil::BackupFile) -> String {
+    b.when.map(|w| w.format(i18n::date_fmt(i18n::DateStyle::ShortSecs)).to_string()).unwrap_or_else(|| b.name.clone())
+}
+
+fn current_ini_text(app: &App) -> String {
+    std::fs::read(&app.cfg.ini_file).map(|b| decode_ini(b).0).unwrap_or_default()
+}
+
+fn restore_form(csrf: &str, name: &str, when: &str, small: bool) -> Markup {
+    html! {
+        form.inline method="post" action={"/backups/" (name) "/restore"}
+            data-confirm=(tf!("Restaurar o backup de {}? O arquivo atual também ganha um backup antes, e o serviço precisa ser reiniciado depois.", when)) {
+            (csrf_input(csrf))
+            @if small {
+                button.btn.small.light type="submit" { (icon("refresh")) (t("Restaurar")) }
+            } @else {
+                button.btn.primary type="submit" { (icon("refresh")) (t("Restaurar este backup")) }
+            }
+        }
+    }
+}
+
+async fn backups_page(State(app): State<Shared>, ctx: Ctx) -> Response {
+    let list = crate::fsutil::list_backups(&app.cfg.ini_file, &app.cfg.backup_dir);
+    let current = current_ini_text(&app);
+    let body = html! {
+        section.card {
+            div.card-head { h2.card-title { (tf!("{} backup(s) do opendhcp.ini", list.len())) } }
+            p.muted.small {
+                (tm("O painel copia o arquivo para {} antes de cada alteração e guarda os {} mais recentes.", &[views::path_code(&app.cfg.backup_dir), html! { (app.cfg.backups_keep) }]))
+            }
+            @if list.is_empty() {
+                p.empty { (t("Nenhum backup ainda. Ele é criado na primeira alteração feita pelo painel.")) }
+            } @else {
+                div.table-wrap {
+                    table {
+                        thead { tr { th { (t("Quando")) } th.num { (t("Tamanho")) } th { (t("Diferença para o atual")) } th.actions { "" } } }
+                        tbody {
+                            @for b in &list {
+                                @let text = std::fs::read(app.cfg.backup_dir.join(&b.name)).map(|x| decode_ini(x).0).unwrap_or_default();
+                                @let d = crate::diff::lines(&current, &text);
+                                @let (del, add) = d.iter().fold((0, 0), |(x, y), l| match l {
+                                    crate::diff::Line::Del(..) => (x + 1, y),
+                                    crate::diff::Line::Add(..) => (x, y + 1),
+                                    _ => (x, y),
+                                });
+                                @let when = backup_when(b);
+                                tr {
+                                    td.nowrap { (when) }
+                                    td.num.nowrap { (tf!("{} KB", format!("{:.1}", b.size as f64 / 1024.0))) }
+                                    td {
+                                        @if del + add == 0 { span.muted.small { (t("igual ao atual")) } }
+                                        @else { span.diff-count.add { "+" (add) } " " span.diff-count.del { "−" (del) } }
+                                    }
+                                    td.actions {
+                                        a.btn.small.light href={"/backups/" (b.name)} { (t("Comparar")) }
+                                        (restore_form(&ctx.s.csrf, &b.name, &when, true))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    page(&app, &ctx, n_("Backups"), "backups", "other", body).into_response()
+}
+
+async fn backup_view(State(app): State<Shared>, ctx: Ctx, UrlPath(name): UrlPath<String>) -> Response {
+    let Some(path) = backup_path(&app, &name) else {
+        return flash(&app, &ctx, false, t("Backup não encontrado."), "/backups");
+    };
+    let b = crate::fsutil::list_backups(&app.cfg.ini_file, &app.cfg.backup_dir).into_iter().find(|b| b.name == name);
+    let when = b.as_ref().map(backup_when).unwrap_or_else(|| name.clone());
+    let backup = std::fs::read(&path).map(|x| decode_ini(x).0).unwrap_or_default();
+    let d = crate::diff::lines(&current_ini_text(&app), &backup);
+    let shown = crate::diff::with_context(&d, 3);
+    let body = html! {
+        section.card {
+            div.card-head {
+                h2.card-title { (tf!("Backup de {}", when)) }
+                div.row {
+                    a.btn.light.small href="/backups" { (t("Voltar")) }
+                    (restore_form(&ctx.s.csrf, &name, &when, false))
+                }
+            }
+            p.muted.small.diff-legend {
+                span.diff-count.del { "−" } " " (t("está no arquivo atual e sai se restaurar")) " · "
+                span.diff-count.add { "+" } " " (t("está no backup e volta se restaurar"))
+            }
+            @if d.iter().all(|l| matches!(l, crate::diff::Line::Same(..))) {
+                p.empty { (t("Este backup é igual ao arquivo atual.")) }
+            } @else {
+                div.table-wrap {
+                    table.diff {
+                        tbody {
+                            @for item in &shown {
+                                @match item {
+                                    Ok(crate::diff::Line::Same(_, b, l)) => tr { td.ln { (b) } td.sign { "" } td.code { (l) } },
+                                    Ok(crate::diff::Line::Del(a, l)) => tr.del { td.ln { (a) } td.sign { "−" } td.code { (l) } },
+                                    Ok(crate::diff::Line::Add(b, l)) => tr.add { td.ln { (b) } td.sign { "+" } td.code { (l) } },
+                                    Err(n) => tr.gap { td.ln { "⋯" } td.sign { "" } td.code { (tf!("{} linha(s) iguais", n)) } },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    page(&app, &ctx, n_("Backups"), "backups", "other", body).into_response()
+}
+
+async fn backup_restore(State(app): State<Shared>, ctx: Ctx, UrlPath(name): UrlPath<String>, Form(f): Form<Fields>) -> Response {
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let Some(path) = backup_path(&app, &name) else {
+        return flash(&app, &ctx, false, t("Backup não encontrado."), "/backups");
+    };
+    let result: Result<(), String> = {
+        let _guard = app.write_lock.lock().await;
+        let ini = &app.cfg.ini_file;
+        std::fs::read(&path)
+            .map_err(|e| tf!("Não consegui ler {}: {}", path.display(), e))
+            .and_then(|bytes| {
+                crate::fsutil::backup(ini, &app.cfg.backup_dir, app.cfg.backups_keep)
+                    .map_err(|e| tf!("Não consegui fazer o backup em {}: {}", app.cfg.backup_dir.display(), e))?;
+                crate::fsutil::write_atomic(ini, &bytes).map_err(|e| tf!("Não consegui gravar {}: {}", ini.display(), e))
+            })
+    };
+    match result {
+        Ok(()) => {
+            app.restart_rev.fetch_add(1, Ordering::SeqCst);
+            tracing::info!(user = %ctx.s.user, backup = %name, "backup do .ini restaurado");
+            app.monitor.set_extra("restart", Some(restart_alert(&app))).await;
+            app.monitor.poke().await;
+            flash(&app, &ctx, true, t("Backup restaurado. Reinicie o serviço para o DHCP usar a configuração restaurada."), "/backups")
+        }
+        Err(e) => flash(&app, &ctx, false, e, "/backups"),
     }
 }
 

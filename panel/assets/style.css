@@ -546,3 +546,29 @@ dl.opts.dev-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .day-nav .icon-btn { text-decoration: none; font-size: 1.1rem; line-height: 1; }
 .day-summary { margin: 0 0 1rem; }
 html.dark input[type="date"] { color-scheme: dark; }
+
+/* ---------- ocupação ao longo do tempo ---------- */
+.chart.occ { height: 11rem; }
+.chart.occ .chart-y { min-width: 2.2rem; }
+path.occ-area { fill: rgb(var(--primary) / 0.14); stroke: none; }
+path.occ-line { fill: none; stroke: rgb(var(--primary)); stroke-width: 2; stroke-linejoin: round; }
+circle.occ-pt { fill: transparent; }
+circle.occ-pt:hover { fill: rgb(var(--primary)); }
+a.chip { text-decoration: none; display: inline-block; }
+
+/* ---------- backups / diferenças ---------- */
+.diff-count { font-family: var(--mono); font-weight: 700; font-size: 0.78rem; }
+.diff-count.add { color: rgb(var(--success)); }
+.diff-count.del { color: rgb(var(--danger)); }
+table.diff { font-family: var(--mono); font-size: 0.75rem; }
+table.diff td { padding: 0.15rem 0.6rem; border: 0; white-space: pre-wrap; word-break: break-all; vertical-align: top; }
+table.diff td.ln { width: 3.5rem; text-align: right; color: rgb(var(--muted)); user-select: none; }
+table.diff td.sign { width: 1rem; text-align: center; font-weight: 700; user-select: none; }
+table.diff tr.add { background: rgb(var(--success) / 0.1); }
+table.diff tr.add td.sign { color: rgb(var(--success)); }
+table.diff tr.del { background: rgb(var(--danger) / 0.08); }
+table.diff tr.del td.sign { color: rgb(var(--danger)); }
+table.diff tr.gap td { color: rgb(var(--muted)); background: rgb(var(--surface-2)); font-style: italic; }
+.diff-legend { margin: 0 0 0.75rem; }
+.occ-peak { margin: 0.75rem 0 0; text-align: center; }
+.chart.occ .chart-plot svg { flex: 1 1 0; min-height: 0; height: auto; }
