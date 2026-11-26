@@ -21,7 +21,11 @@ echo "== Open DHCP $V"
 cargo build --release -p opendhcp-panel -p open-dhcp
 # O código original usa campos de 1 byte como "array flexível" (strcpy além do tamanho declarado):
 # sem _FORTIFY_SOURCE, senão a checagem de tamanho abortaria o servidor nesses pontos.
-g++ -O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wno-stringop-overflow -include time.h -include pthread.h \
+# Proteções contra exploração de falhas de memória: PIE (ASLR), canário de pilha, pilha não
+# executável e RELRO completo.
+HARDEN=(-fPIE -pie -fstack-protector-strong -fstack-clash-protection -fcf-protection
+        -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
+g++ -O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wno-stringop-overflow "${HARDEN[@]}" \
   -o target/release/opendhcpd ../opendhcpd.cpp -lpthread
 
 # panel.toml do pacote: senha inicial "admin" (o painel avisa até ser trocada)

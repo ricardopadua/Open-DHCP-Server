@@ -6,8 +6,34 @@ Wants=network-online.target
 
 [Service]
 Type=forking
-ExecStart=/opt/opendhcp/opendhcpd -i /opt/opendhcp/opendhcp.ini -s /tmp/opendhcp.state -l /opt/opendhcp/log/opendhcp%%Y%%m%%d.log
+# Estado dos leases fora do /tmp (lá outro usuário local poderia plantar um link ou arquivo).
+ExecStart=/opt/opendhcp/opendhcpd -i /opt/opendhcp/opendhcp.ini -s /var/lib/opendhcp/opendhcp.state -l /opt/opendhcp/log/opendhcp%%Y%%m%%d.log
+StateDirectory=opendhcp
+StateDirectoryMode=0700
 Restart=on-failure
+
+# O opendhcpd exige uid 0, mas só precisa abrir a porta 67: o resto dos poderes de root fica fora.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_BROADCAST CAP_NET_RAW
+NoNewPrivileges=true
+UMask=0022
+ProtectSystem=strict
+ReadWritePaths=-/opt/opendhcp -/var/lib/opendhcp
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

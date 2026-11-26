@@ -1920,6 +1920,7 @@ dependencies = [
  "embed-manifest",
  "opendhcp-panel",
  "png",
+ "serde_json",
  "sys-locale",
  "tao",
  "tokio",

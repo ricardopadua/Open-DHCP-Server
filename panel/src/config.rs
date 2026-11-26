@@ -12,7 +12,8 @@ pub struct Config {
     pub listen: SocketAddr,
     /// `opendhcp.ini` usado pelo servidor (`-i`).
     pub ini_file: PathBuf,
-    /// Arquivo de estado dos leases (`-s`; padrão do servidor: /tmp/opendhcp.state).
+    /// Arquivo de estado dos leases (`-s`). Fica fora do /tmp: lá outro usuário local poderia
+    /// plantar um link ou um arquivo falso.
     #[serde(default = "default_state")]
     pub state_file: PathBuf,
     /// Log do servidor (`-l`), com os mesmos `%Y%m%d` do opendhcpd. Opcional: sem ele a tela
@@ -39,6 +40,15 @@ pub struct Config {
     pub secure_cookie: bool,
     #[serde(default = "default_session_hours")]
     pub session_hours: u64,
+    /// Nomes (com porta, se não for a 80/443) pelos quais o painel pode ser acessado, além de
+    /// 127.0.0.1/localhost/[::1] na porta do `listen`. Pedidos com outro `Host` são recusados
+    /// (proteção contra DNS rebinding). Ex.: ["painel.minharede.lan"] atrás de um proxy.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Proxies reversos confiáveis: só deles o painel aceita o IP do cliente em
+    /// `X-Forwarded-For` (usado no bloqueio por tentativas de login e nos logs).
+    #[serde(default)]
+    pub trusted_proxies: Vec<std::net::IpAddr>,
     pub auth: Auth,
     #[serde(default)]
     pub service: Service,
@@ -73,7 +83,7 @@ fn default_listen() -> SocketAddr {
     "127.0.0.1:8067".parse().unwrap()
 }
 fn default_state() -> PathBuf {
-    "/tmp/opendhcp.state".into()
+    "/var/lib/opendhcp/opendhcp.state".into()
 }
 fn default_backup_dir() -> PathBuf {
     "/var/lib/opendhcp-panel/backups".into()

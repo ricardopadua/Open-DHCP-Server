@@ -55,6 +55,62 @@ pub struct App {
     devices: DeviceStore,
     /// Fabricantes por MAC.
     oui: Oui,
+    /// Um login por vez: a checagem do bloqueio e a contagem da falha ficam juntas (sem isso,
+    /// tentativas em paralelo passariam todas antes de a primeira falha ser contada).
+    login_gate: tokio::sync::Mutex<()>,
+    /// Links de login de uso único (aplicativo Open DHCP com o painel embutido): token → validade.
+    once: std::sync::Mutex<HashMap<String, std::time::Instant>>,
+}
+
+/// O painel numa variável compartilhada, para quem o embute (ex.: o aplicativo desktop).
+pub type SharedApp = Arc<App>;
+
+impl App {
+    /// Cria um link de login de uso único, válido por 2 minutos.
+    pub fn login_link(&self) -> String {
+        let token = auth::random_token();
+        let mut once = self.once.lock().unwrap();
+        once.retain(|_, t| t.elapsed() < Duration::from_secs(120));
+        once.insert(token.clone(), std::time::Instant::now());
+        format!("/auth/once/{token}")
+    }
+
+    /// `Host` aceito: endereço IP literal (inclusive 127.0.0.1/[::1], com qualquer porta),
+    /// `localhost` ou um dos `allowed_hosts`. Nomes de outros domínios são recusados para que uma
+    /// página de fora não fale com o painel por DNS rebinding.
+    fn host_allowed(&self, host: &str) -> bool {
+        let host = host.trim().to_ascii_lowercase();
+        if host.is_empty() {
+            return false;
+        }
+        if self.cfg.allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+            return true;
+        }
+        let name = if let Some(rest) = host.strip_prefix('[') {
+            rest.split(']').next().unwrap_or("")
+        } else {
+            host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h).unwrap_or(&host)
+        };
+        name == "localhost" || name.parse::<std::net::IpAddr>().is_ok()
+    }
+
+    /// IP do cliente: o da conexão ou, se ela vier de um proxy confiável, o último endereço de
+    /// `X-Forwarded-For` que não seja de outro proxy confiável.
+    fn client_ip(&self, peer: SocketAddr, headers: &axum::http::HeaderMap) -> std::net::IpAddr {
+        let ip = peer.ip();
+        if !self.cfg.trusted_proxies.contains(&ip) {
+            return ip;
+        }
+        headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                v.rsplit(',')
+                    .filter_map(|p| p.trim().parse::<std::net::IpAddr>().ok())
+                    .find(|p| !self.cfg.trusted_proxies.contains(p))
+            })
+            .unwrap_or(ip)
+    }
 }
 
 impl App {
@@ -84,7 +140,7 @@ pub const DEFAULT_PASSWORD: &str = "admin";
 type Shared = Arc<App>;
 type Fields = HashMap<String, String>;
 
-pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Router {
+pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> (Router, SharedApp) {
     let default_password = auth::verify_password(DEFAULT_PASSWORD, &cfg.auth.password_hash);
     let creds = RwLock::new((cfg.auth.username.clone(), cfg.auth.password_hash.clone()));
     let app = Arc::new(App {
@@ -98,12 +154,15 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         sessions: Sessions::default(),
         monitor,
         write_lock: tokio::sync::Mutex::new(()),
+        login_gate: tokio::sync::Mutex::new(()),
+        once: std::sync::Mutex::new(HashMap::new()),
     });
     if default_password {
         app.monitor.put_extra(password_alert());
     }
-    Router::new()
+    let router = Router::new()
         .route("/", get(dashboard))
+        .route("/auth/once/{token}", get(login_once))
         .route("/live", get(live))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
@@ -135,13 +194,40 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Route
         .route("/static/flatpickr.css", get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], FLATPICKR_CSS) }))
         .route("/static/theme.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], THEME_JS) }))
         .layer(middleware::from_fn(with_lang))
-        .layer(middleware::from_fn(security_headers))
-        .with_state(app)
+        .layer(middleware::from_fn_with_state(app.clone(), host_guard))
+        .layer(middleware::from_fn_with_state(app.clone(), security_headers))
+        .with_state(app.clone());
+    (router, app)
 }
 
-async fn security_headers(req: Request, next: Next) -> Response {
+/// Recusa `Host` desconhecido (DNS rebinding) e POST vindo de outra origem.
+async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Response {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    if !app.host_allowed(host) {
+        tracing::warn!(%host, "pedido recusado: Host não permitido (veja allowed_hosts)");
+        return (StatusCode::MISDIRECTED_REQUEST, "Host not allowed").into_response();
+    }
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+            let same = origin.split_once("://").is_some_and(|(_, h)| h.eq_ignore_ascii_case(host));
+            if !same {
+                tracing::warn!(%origin, %host, "pedido recusado: origem diferente");
+                return (StatusCode::FORBIDDEN, "Origin not allowed").into_response();
+            }
+        }
+    }
+    next.run(req).await
+}
+
+async fn security_headers(State(app): State<Shared>, req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     let h = res.headers_mut();
+    if app.cfg.secure_cookie {
+        h.insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=31536000"));
+    }
+    h.insert("permissions-policy", HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"));
+    h.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+    h.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"),
@@ -178,8 +264,15 @@ struct NextQuery {
 /// Troca o idioma (cookie por 1 ano) e volta para a página em que a pessoa estava.
 async fn set_lang(UrlPath(code): UrlPath<String>, Query(q): Query<NextQuery>) -> Response {
     let Some(lang) = Lang::from_code(&code) else { return StatusCode::NOT_FOUND.into_response() };
-    // só caminhos locais (sem "//host" nem esquema), para não virar redirecionamento aberto
-    let next = q.next.filter(|n| n.starts_with('/') && !n.starts_with("//") && !n.contains('\\')).unwrap_or_else(|| "/".into());
+    // só caminhos locais com caracteres comuns (sem "//host", "\\", espaços ou controles como TAB,
+    // que o navegador remove e transformaria "/\t/site" em "//site")
+    let safe = |n: &str| {
+        n.starts_with('/')
+            && !n.starts_with("//")
+            && n.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.?=&%:".contains(c))
+            && !n.contains("/%2f") && !n.to_ascii_lowercase().contains("%2f%2f")
+    };
+    let next = q.next.filter(|n| safe(n)).unwrap_or_else(|| "/".into());
     let cookie = format!("{LANG_COOKIE}={}; Path=/; Max-Age=31536000; SameSite=Lax", lang.code());
     ([(header::SET_COOKIE, cookie)], Redirect::to(&next)).into_response()
 }
@@ -198,7 +291,16 @@ impl FromRequestParts<Shared> for Ctx {
         let jar = CookieJar::from_headers(&parts.headers);
         let token = jar.get(COOKIE).map(|c| c.value().to_string()).unwrap_or_default();
         match app.sessions.get(&token) {
-            Some(s) => Ok(Ctx { token, s }),
+            Some(s) => {
+                // Senha padrão: só "Minha conta" até ela ser trocada.
+                let path = parts.uri.path();
+                let free = matches!(path, "/account" | "/logout" | "/live" | "/notes/dismiss") || path.starts_with("/lang/");
+                if app.default_password.load(Ordering::SeqCst) && !free {
+                    app.sessions.set_flash(&token, false, t("Troque a senha padrão para continuar."));
+                    return Err(Redirect::to("/account").into_response());
+                }
+                Ok(Ctx { token, s })
+            }
             None => Err(Redirect::to("/login").into_response()),
         }
     }
@@ -211,6 +313,7 @@ impl Ctx {
         if auth::ct_eq(sent, &self.s.csrf) {
             Ok(())
         } else {
+            tracing::warn!(user = %self.s.user, "formulário recusado: token CSRF inválido");
             Err((StatusCode::FORBIDDEN, t("Formulário expirado; recarregue a página.").to_string()).into_response())
         }
     }
@@ -279,6 +382,7 @@ fn decode_ini(bytes: Vec<u8>) -> (String, bool) {
 /// formulário foi aberto (`rev`). Faz backup antes de gravar.
 async fn mutate_ini<T>(
     app: &App,
+    actor: &Ctx,
     rev: &str,
     change: impl FnOnce(&mut IniDoc) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -301,7 +405,7 @@ async fn mutate_ini<T>(
             .map_err(|e| tf!("Não consegui fazer o backup em {}: {}", app.cfg.backup_dir.display(), e))?;
         crate::fsutil::write_atomic(path, &bytes).map_err(|e| tf!("Não consegui gravar {}: {}", path.display(), e))?;
         app.restart_rev.fetch_add(1, Ordering::SeqCst);
-        tracing::info!(file = %path.display(), "configuração alterada pelo painel");
+        tracing::info!(file = %path.display(), user = %actor.s.user, "configuração alterada pelo painel");
         out
     };
     app.monitor.set_extra("restart", Some(restart_alert(app))).await;
@@ -382,10 +486,12 @@ async fn login_page(jar: CookieJar, State(app): State<Shared>) -> Response {
 async fn login(
     State(app): State<Shared>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     jar: CookieJar,
     Form(f): Form<Fields>,
 ) -> Response {
-    let ip = peer.ip();
+    let ip = app.client_ip(peer, &headers);
+    let _gate = app.login_gate.lock().await;
     if app.sessions.locked_out(ip) {
         return (StatusCode::TOO_MANY_REQUESTS, views::login_page(Some(t("Muitas tentativas. Aguarde 5 minutos.")))).into_response();
     }
@@ -395,7 +501,9 @@ async fn login(
     let pass_ok = tokio::task::spawn_blocking(move || auth::verify_password(&pass, &hash)).await.unwrap_or(false);
     let ok = pass_ok && auth::ct_eq(&user, &username);
     if !ok {
-        app.sessions.record_fail(ip);
+        if app.sessions.record_fail(ip) {
+            tracing::warn!(%ip, "IP bloqueado por 5 minutos após 5 senhas erradas");
+        }
         tracing::warn!(%ip, "login recusado");
         tokio::time::sleep(Duration::from_millis(600)).await;
         return (StatusCode::UNAUTHORIZED, views::login_page(Some(t("Usuário ou senha inválidos.")))).into_response();
@@ -404,13 +512,33 @@ async fn login(
     let ttl = Duration::from_secs(app.cfg.session_hours * 3600);
     let token = app.sessions.create(&user, ttl);
     tracing::info!(%ip, %user, "login");
-    let cookie = Cookie::build((COOKIE, token))
+    let cookie = session_cookie(&app, token);
+    (jar.add(cookie), Redirect::to("/")).into_response()
+}
+
+fn session_cookie(app: &App, token: String) -> Cookie<'static> {
+    Cookie::build((COOKIE, token))
         .http_only(true)
         .same_site(SameSite::Strict)
         .secure(app.cfg.secure_cookie)
         .path("/")
-        .build(); // cookie de sessão do navegador; a validade real fica no servidor
-    (jar.add(cookie), Redirect::to("/")).into_response()
+        .build() // cookie de sessão do navegador; a validade real fica no servidor
+}
+
+/// Link de login de uso único (aplicativo com o painel embutido): entra sem digitar senha.
+async fn login_once(State(app): State<Shared>, jar: CookieJar, UrlPath(token): UrlPath<String>) -> Response {
+    let valid = {
+        let mut once = app.once.lock().unwrap();
+        let found = once.iter().find(|(t, at)| auth::ct_eq(t, &token) && at.elapsed() < Duration::from_secs(120)).map(|(t, _)| t.clone());
+        found.map(|t| once.remove(&t)).is_some()
+    };
+    if !valid {
+        return Redirect::to("/login").into_response();
+    }
+    let user = app.creds.read().unwrap().0.clone();
+    let token = app.sessions.create(&user, Duration::from_secs(app.cfg.session_hours * 3600));
+    tracing::info!(%user, "login pelo aplicativo (link de uso único)");
+    (jar.add(session_cookie(&app, token)), Redirect::to("/")).into_response()
 }
 
 async fn logout(State(app): State<Shared>, ctx: Ctx, jar: CookieJar, Form(f): Form<Fields>) -> Response {
@@ -733,7 +861,7 @@ async fn reservation_create(State(app): State<Shared>, ctx: Ctx, Form(f): Form<F
     let input = ReservationInput { mac: field(&f, "mac"), ip: field(&f, "ip"), hostname: field(&f, "hostname") };
     let result = match lease_conflict(&app, input.ip, input.mac) {
         Some(e) => Err(e),
-        None => mutate_ini(&app, field(&f, "rev"), |doc| dhcp::add_reservation(doc, &input)).await,
+        None => mutate_ini(&app, &ctx, field(&f, "rev"), |doc| dhcp::add_reservation(doc, &input)).await,
     };
     match result {
         Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} criada.", mac), "/reservations"),
@@ -780,7 +908,7 @@ async fn reservation_update(State(app): State<Shared>, ctx: Ctx, UrlPath(n): Url
     let input = ReservationInput { mac: field(&f, "mac"), ip: field(&f, "ip"), hostname: field(&f, "hostname") };
     let result = match lease_conflict(&app, input.ip, input.mac) {
         Some(e) => Err(e),
-        None => mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_reservation(doc, n, &input)).await,
+        None => mutate_ini(&app, &ctx, field(&f, "rev"), |doc| dhcp::update_reservation(doc, n, &input)).await,
     };
     match result {
         Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} atualizada.", mac), "/reservations"),
@@ -851,7 +979,7 @@ async fn import_save(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Fields>)
         return r;
     }
     let (csv, update) = (field(&f, "csv"), field(&f, "update") == "1");
-    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::import_csv(doc, csv, update)).await {
+    match mutate_ini(&app, &ctx, field(&f, "rev"), |doc| dhcp::import_csv(doc, csv, update)).await {
         Ok(r) => flash(&app, &ctx, true, tf!("Importação concluída: {} reserva(s) criada(s), {} atualizada(s).", r.created, r.updated), "/reservations"),
         Err(e) => {
             let form = import_form(&ctx.s.csrf, field(&f, "rev"), csv, update, Some(&e));
@@ -1012,7 +1140,7 @@ async fn reservation_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): Url
     if let Err(r) = ctx.check_csrf(&f) {
         return r;
     }
-    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::delete_reservation(doc, n)).await {
+    match mutate_ini(&app, &ctx, field(&f, "rev"), |doc| dhcp::delete_reservation(doc, n)).await {
         Ok(mac) => flash(&app, &ctx, true, tf!("Reserva de {} excluída.", mac), "/reservations"),
         Err(e) => flash(&app, &ctx, false, e, "/reservations"),
     }
@@ -1249,7 +1377,7 @@ async fn range_save(app: Shared, ctx: Ctx, n: Option<usize>, f: Fields) -> Respo
     }
     let nf = net_fields(&f);
     let input = range_input(&f, &nf);
-    let result = mutate_ini(&app, field(&f, "rev"), |doc| match n {
+    let result = mutate_ini(&app, &ctx, field(&f, "rev"), |doc| match n {
         Some(n) => dhcp::update_range_set(doc, n, &input),
         None => dhcp::add_range_set(doc, &input).map(|_| ()),
     })
@@ -1316,7 +1444,7 @@ async fn range_delete(State(app): State<Shared>, ctx: Ctx, UrlPath(n): UrlPath<u
     if let Err(r) = ctx.check_csrf(&f) {
         return r;
     }
-    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::delete_range_set(doc, n)).await {
+    match mutate_ini(&app, &ctx, field(&f, "rev"), |doc| dhcp::delete_range_set(doc, n)).await {
         Ok(()) => flash(&app, &ctx, true, t("Conjunto de faixas excluído."), "/ranges"),
         Err(e) => flash(&app, &ctx, false, e, "/ranges"),
     }
@@ -1371,7 +1499,7 @@ async fn options_update(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Field
     let nf = net_fields(&f);
     let opts = OptionsInput { mask: &nf.mask, router: field(&f, "router"), dns: field(&f, "dns"), lease: &nf.lease };
     let domain = field(&f, "domain");
-    match mutate_ini(&app, field(&f, "rev"), |doc| dhcp::update_globals(doc, domain, &opts)).await {
+    match mutate_ini(&app, &ctx, field(&f, "rev"), |doc| dhcp::update_globals(doc, domain, &opts)).await {
         Ok(()) => flash(&app, &ctx, true, t("Opções globais salvas."), "/options"),
         Err(e) => {
             let form = options_form(
@@ -1420,7 +1548,15 @@ fn valid_username(u: &str) -> bool {
     (1..=32).contains(&u.len()) && u.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
-async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInfo<SocketAddr>, ctx: Ctx, Form(f): Form<Fields>) -> Response {
+async fn account_update(
+    State(app): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+    ctx: Ctx,
+    Form(f): Form<Fields>,
+) -> Response {
+    let ip = app.client_ip(peer, &headers);
     if let Err(r) = ctx.check_csrf(&f) {
         return r;
     }
@@ -1430,14 +1566,14 @@ async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInf
         let body = account_form(&ctx.s.csrf, &user, Some(msg));
         (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, n_("Minha conta"), "account", "other", body)).into_response()
     };
-    if app.sessions.locked_out(peer.ip()) {
+    if app.sessions.locked_out(ip) {
         return fail(t("Muitas tentativas. Aguarde 5 minutos."));
     }
     let current_hash = app.creds.read().unwrap().1.clone();
     let current = field(&f, "current").to_string();
     let ok = tokio::task::spawn_blocking(move || auth::verify_password(&current, &current_hash)).await.unwrap_or(false);
     if !ok {
-        app.sessions.record_fail(peer.ip());
+        app.sessions.record_fail(ip);
         tokio::time::sleep(Duration::from_millis(600)).await;
         return fail(t("A senha atual está errada."));
     }
@@ -1471,10 +1607,13 @@ async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInf
     *app.creds.write().unwrap() = (user.clone(), hash);
     app.default_password.store(false, Ordering::SeqCst);
     app.monitor.set_extra("default-password", None).await;
-    app.sessions.clear_fails(peer.ip());
+    app.sessions.clear_fails(ip);
     app.sessions.keep_only(&ctx.token, &user);
-    tracing::info!(%user, "usuário/senha do painel alterados");
-    flash(&app, &ctx, true, t("Usuário e senha atualizados."), "/")
+    tracing::info!(%ip, %user, "usuário/senha do painel alterados");
+    // token novo para a sessão atual depois de trocar a senha
+    let token = app.sessions.rotate(&ctx.token).unwrap_or_else(|| ctx.token.clone());
+    app.sessions.set_flash(&token, true, t("Usuário e senha atualizados."));
+    (jar.add(session_cookie(&app, token)), Redirect::to("/")).into_response()
 }
 
 // ---------- notificações ----------

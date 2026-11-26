@@ -583,6 +583,7 @@ void pvdata(data9*, data3*);
 void recvRepl(data9*);
 void runProg();
 void lockIP(MYDWORD);
+void setRangeExpiry(MYDWORD, time_t);
 void sendScopeStatus(data19 *req);
 void sendStatus(data19 *req);
 void setTempLease(data7*);

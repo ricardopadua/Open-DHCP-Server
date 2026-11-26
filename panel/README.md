@@ -101,16 +101,29 @@ Com a senha de fábrica `admin`, todas as telas mostram um aviso até ela ser tr
 
 ## Segurança
 
-- Login com senha em hash Argon2; sessão em cookie `HttpOnly` + `SameSite=Strict`; token CSRF em
-  todo formulário; bloqueio de 5 minutos após 5 senhas erradas pelo mesmo IP.
-- Tudo o que vem dos dispositivos (nome do host no log e no arquivo de estado) é escapado no HTML;
-  CSP sem script nem estilo inline.
-- Entradas são validadas (MAC, IPv4, máscara, faixas sem sobreposição, limite de 125 faixas) e
-  valores com quebra de linha são recusados, para não injetar seções no `.ini`.
-- Se o `.ini` mudar entre abrir e salvar um formulário, a gravação é recusada (sem sobrescrever
-  a alteração de outra pessoa).
-- Ouve só em `127.0.0.1` por padrão. Para acesso remoto, use um proxy com HTTPS e
-  `secure_cookie = true`. Não exponha o painel sem TLS na mesma rede dos dispositivos.
+- **Login:** senha em hash Argon2id; sessão em cookie `HttpOnly` + `SameSite=Strict`, trocada a
+  cada login e depois de mudar a senha; token CSRF em todo formulário.
+- **Senha padrão:** com `admin`, o painel só deixa abrir **Minha conta** até ela ser trocada.
+- **Tentativas:** bloqueio de 5 minutos após 5 senhas erradas pelo mesmo IP, contando um login
+  por vez (tentativas em paralelo não escapam do limite). Atrás de um proxy, liste-o em
+  `trusted_proxies` para valer o IP real do cliente.
+- **DNS rebinding:** só são aceitos pedidos com `Host` de endereço IP, `localhost` ou um dos
+  `allowed_hosts`, e POST só da mesma origem; uma página da internet não consegue falar com o
+  painel local.
+- **Injeção:** tudo o que vem dos dispositivos é escapado no HTML; CSP sem script nem estilo
+  inline; entradas validadas (MAC, IPv4, máscara, faixas, nomes) e valores com quebra de linha
+  recusados, para não injetar seções no `.ini`; CSV exportado protegido contra fórmulas.
+- **Arquivos:** gravações atômicas com temporário exclusivo e permissão restrita desde a criação;
+  estado dos leases em `/var/lib/opendhcp` (fora do `/tmp`); backups em pasta 0700.
+- **Serviços:** as units do systemd tiram os poderes de root que não são usados (o `opendhcpd`
+  fica só com a porta 67), deixam o sistema só leitura fora das pastas de dados e isolam `/tmp`,
+  dispositivos e kernel.
+- **Aplicativo:** no modo embutido, entra por um link de uso único e a senha do painel é
+  aleatória; ações internas só valem na tela de aviso local, e a janela não navega para fora do
+  painel.
+- Se o `.ini` mudar entre abrir e salvar um formulário, a gravação é recusada.
+- Ouve só em `127.0.0.1` por padrão. Para acesso remoto, use um proxy com HTTPS,
+  `secure_cookie = true` (liga também o HSTS) e o nome publicado em `allowed_hosts`.
 
 ## Traduções
 

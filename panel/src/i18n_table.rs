@@ -394,4 +394,7 @@ pub static TABLE: &[[&str; 4]] = &[
     ["{} linha(s) iguais", "{} unchanged line(s)", "{} ligne(s) identique(s)", "{} línea(s) iguales"],
     ["Backup não encontrado.", "Backup not found.", "Sauvegarde introuvable.", "Copia no encontrada."],
     ["Backup restaurado. Reinicie o serviço para o DHCP usar a configuração restaurada.", "Backup restored. Restart the service so DHCP uses the restored configuration.", "Sauvegarde restaurée. Redémarrez le service pour que le DHCP utilise la configuration restaurée.", "Copia restaurada. Reinicie el servicio para que el DHCP use la configuración restaurada."],
+
+    // ---------- segurança ----------
+    ["Troque a senha padrão para continuar.", "Change the default password to continue.", "Changez le mot de passe par défaut pour continuer.", "Cambie la contraseña predeterminada para continuar."],
 ];

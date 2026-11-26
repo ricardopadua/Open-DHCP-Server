@@ -118,11 +118,24 @@ impl Sessions {
         }
     }
 
-    pub fn record_fail(&self, ip: IpAddr) {
+    /// Conta uma falha; devolve `true` quando ela acabou de bloquear o IP.
+    pub fn record_fail(&self, ip: IpAddr) -> bool {
         let mut fails = self.fails.lock().unwrap();
+        // entradas vencidas saem (o mapa não cresce sem limite)
+        fails.retain(|_, (_, since)| since.elapsed() < LOCK);
         let e = fails.entry(ip).or_insert((0, Instant::now()));
         e.0 += 1;
         e.1 = Instant::now();
+        e.0 == MAX_FAILS
+    }
+
+    /// Troca o token da sessão (depois de mudar a senha), mantendo os dados dela.
+    pub fn rotate(&self, token: &str) -> Option<String> {
+        let mut map = self.map.lock().unwrap();
+        let s = map.remove(token)?;
+        let new = random_token();
+        map.insert(new.clone(), s);
+        Some(new)
     }
 
     pub fn clear_fails(&self, ip: IpAddr) {

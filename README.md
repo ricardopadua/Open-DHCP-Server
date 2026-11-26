@@ -45,6 +45,40 @@ not started automatically: review `opendhcp.ini` in the panel and press *Start*.
 - `panel/desktop/`: the Open DHCP desktop app.
 - `panel/packaging/`: release packaging (`build-release.sh`).
 
+## Security fixes in this fork
+
+The original `opendhcpd` (about 10 years old) had memory-safety bugs reachable by any device on
+the LAN, without authentication, in a process that runs as root. This fork fixes them in
+`opendhcpd.cpp` without changing how the server is configured or used:
+
+- **Packet parsing:**
+  - a hardware address longer than 16 bytes is rejected;
+  - options are checked against the packet size and their expected length;
+  - the reply size requested by the client is capped.
+- **Hostnames:**
+  - a single fixed-size slot per lease, so loading the state file or replication can no longer
+    overflow or free it;
+  - restricted to letters, digits, `-` and `_`, which blocks log forging and HTML in the status
+    page.
+- **Logs:** bounded writes into the log buffer (every `sprintf` became `snprintf`).
+- **HTTP status page:**
+  - listens on `127.0.0.1` by default;
+  - the allowed-client list is checked before reading the request;
+  - the request buffer is terminated correctly;
+  - the page buffer has room for its fixed footer.
+- **Leases:** `DHCPDECLINE` locks an address for one hour instead of forever, and leases received
+  through replication are capped.
+- **Files:**
+  - the state file is in `/var/lib/opendhcp` instead of `/tmp`;
+  - files are opened without following symlinks;
+  - `umask 022` instead of `0`.
+- **Build:** PIE, stack protector, full RELRO and non-executable stack. The systemd units drop
+  every root capability except binding port 67.
+
+Replication between two servers is still not authenticated: only enable `[REPLICATION_SERVERS]`
+on a trusted network. Regression tests for malformed packets are in
+[`tests/opendhcpd/`](tests/opendhcpd/README.md).
+
 ## Credits and license
 
 - **Open DHCP Server** © 2005 Achal Dhir, licensed under the GNU GPL v2

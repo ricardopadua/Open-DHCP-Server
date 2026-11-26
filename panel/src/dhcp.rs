@@ -296,6 +296,10 @@ pub fn suggest_ip(doc: &IniDoc, in_use: &[Ipv4Addr]) -> Option<Ipv4Addr> {
 }
 
 fn csv_field(s: &str) -> String {
+    // planilhas executam células que começam com = + - @ (injeção de fórmula)
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        return csv_field(&format!("'{s}"));
+    }
     if s.contains([',', ';', '"', '\n']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {

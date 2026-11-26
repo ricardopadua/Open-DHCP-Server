@@ -6,9 +6,15 @@ listen = "127.0.0.1:8067"
 secure_cookie = false
 session_hours = 8
 
+# Nomes aceitos no cabeçalho Host além de 127.0.0.1/localhost na porta acima (proteção contra
+# DNS rebinding). Atrás de um proxy, ponha aqui o nome publicado, ex.: ["painel.minharede.lan"].
+allowed_hosts = []
+# Proxies reversos confiáveis, dos quais o painel aceita o IP real em X-Forwarded-For.
+trusted_proxies = []
+
 # Os mesmos arquivos passados ao servidor: opendhcpd -i <ini_file> -s <state_file>
 ini_file = "/opt/opendhcp/opendhcp.ini"
-state_file = "/tmp/opendhcp.state"
+state_file = "/var/lib/opendhcp/opendhcp.state"
 
 # Log do servidor (-l), com o mesmo padrão de data. Alimenta a tela Atividade, o gráfico e os
 # alertas. Com LogLevel=Normal o servidor registra IPs entregues, renovações e liberações; com
