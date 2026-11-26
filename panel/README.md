@@ -1,5 +1,10 @@
 # opendhcp-panel
 
+> Painel do [Open DHCP Server](http://dhcpserver.sourceforge.net/), servidor DHCP de **Achal Dhir**
+> (© 2005, GPL v2). Este repositório é um fork de
+> [ss-plus/Open-DHCP-Server](https://github.com/ss-plus/Open-DHCP-Server); o servidor (`opendhcpd`)
+> continua o original, sem alterações.
+
 Painel web de administração e monitoramento em tempo real para o Open DHCP Server, escrito em
 Rust. É um programa separado: **o servidor DHCP (`opendhcpd`) não muda**. O painel:
 
