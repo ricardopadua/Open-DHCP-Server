@@ -59,7 +59,8 @@ impl History {
                  UNIQUE (ts, text)
              );
              CREATE INDEX IF NOT EXISTS events_mac ON events (mac, ts);
-             CREATE TABLE IF NOT EXISTS dismissed (key TEXT PRIMARY KEY, rev TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS dismissed (key TEXT PRIMARY KEY, rev TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS occupancy (ts TEXT PRIMARY KEY, used INTEGER NOT NULL, total INTEGER NOT NULL);",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -127,7 +128,42 @@ impl History {
         }
         let limit = (now - chrono::Duration::days(i64::from(days))).format(TS_FMT).to_string();
         let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM occupancy WHERE ts < ?1", [&limit]);
         conn.execute("DELETE FROM events WHERE ts < ?1", [limit]).unwrap_or(0)
+    }
+
+    /// Ocupação das faixas no intervalo de 5 minutos `bucket` (a última medição do intervalo vale).
+    pub fn record_occupancy(&self, bucket: NaiveDateTime, used: u64, total: u64) {
+        let conn = self.conn.lock().unwrap();
+        let r = conn.execute(
+            "INSERT OR REPLACE INTO occupancy (ts, used, total) VALUES (?1, ?2, ?3)",
+            params![bucket.format(TS_FMT).to_string(), used as i64, total as i64],
+        );
+        if let Err(e) = r {
+            tracing::error!(error = %e, "falha ao gravar a ocupação");
+        }
+    }
+
+    /// Medições desde `since` (uma a cada 5 min); com `hourly`, o pico de cada hora.
+    pub fn occupancy(&self, since: NaiveDateTime, hourly: bool) -> Vec<(NaiveDateTime, u64, u64)> {
+        let sql = if hourly {
+            "SELECT substr(ts, 1, 13) || ':00:00', MAX(used), MAX(total) FROM occupancy WHERE ts >= ?1 GROUP BY substr(ts, 1, 13) ORDER BY 1"
+        } else {
+            "SELECT ts, used, total FROM occupancy WHERE ts >= ?1 ORDER BY ts"
+        };
+        let conn = self.conn.lock().unwrap();
+        let result = conn.prepare_cached(sql).and_then(|mut st| {
+            st.query_map([since.format(TS_FMT).to_string()], |r| {
+                let ts: String = r.get(0)?;
+                Ok((ts, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        });
+        result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(ts, u, t)| NaiveDateTime::parse_from_str(&ts, TS_FMT).ok().map(|d| (d, u, t)))
+            .collect()
     }
 
     pub fn dismissed(&self) -> HashMap<String, String> {
@@ -192,6 +228,22 @@ mod tests {
         assert_eq!(h.prune(0, now), 0);
         assert_eq!(h.prune(1, now), 2, "apaga o que tem mais de 1 dia (antes de 26/11 08:00:30)");
         assert_eq!(h.recent(10).len(), 1);
+    }
+
+    #[test]
+    fn ocupacao_por_intervalo_e_por_hora() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::open(&dir.path().join("h.sqlite")).unwrap();
+        let t = |hh: u32, mm: u32| NaiveDate::from_ymd_opt(2026, 11, 26).unwrap().and_hms_opt(hh, mm, 0).unwrap();
+        h.record_occupancy(t(10, 0), 5, 100);
+        h.record_occupancy(t(10, 0), 7, 100); // mesmo intervalo: fica a última
+        h.record_occupancy(t(10, 5), 30, 100);
+        h.record_occupancy(t(11, 0), 12, 100);
+        let all = h.occupancy(t(0, 0), false);
+        assert_eq!(all.iter().map(|x| x.1).collect::<Vec<_>>(), [7, 30, 12]);
+        let hourly = h.occupancy(t(0, 0), true);
+        assert_eq!(hourly, [(t(10, 0), 30, 100), (t(11, 0), 12, 100)]);
+        assert_eq!(h.occupancy(t(10, 30), false).len(), 1);
     }
 
     #[test]

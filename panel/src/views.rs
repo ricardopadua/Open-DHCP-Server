@@ -44,6 +44,7 @@ pub fn icon(name: &str) -> Markup {
         "edit" => "M4 20h4L18.5 9.5a2.83 2.83 0 0 0-4-4L4 16v4M13.5 6.5l4 4",
         "bell" => "M10 5a2 2 0 1 1 4 0 7 7 0 0 1 4 6v3a4 4 0 0 0 2 3H4a4 4 0 0 0 2-3v-3a7 7 0 0 1 4-6M9 17v1a3 3 0 0 0 6 0v-1",
         "x" => "M18 6 6 18M6 6l12 12",
+        "history" => "M12 8v4l2 2M3.05 11a9 9 0 1 1 .5 4M3 20v-5h5",
         "globe" => "M3 12a9 9 0 1 0 18 0 9 9 0 1 0-18 0M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 0 0 0 18M12.5 3a17 17 0 0 1 0 18",
         "download" => "M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 11l5 5 5-5M12 4v12",
         "upload" => "M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 9l5-5 5 5M12 4v12",
@@ -347,6 +348,7 @@ const NAV: [(&str, &[NavItem]); 3] = [
         ("/reservations", "reservations", n_("Reservas"), "pin"),
         ("/ranges", "ranges", n_("Faixas"), "ranges"),
         ("/options", "options", n_("Opções globais"), "settings"),
+        ("/backups", "backups", n_("Backups"), "history"),
     ]),
     (n_("Sistema"), &[
         ("/account", "account", n_("Minha conta"), "lock"),
@@ -562,7 +564,68 @@ pub fn frag_updated(snap: &Snapshot) -> Markup {
 
 // ---------- visão geral ----------
 
-pub fn dashboard_body(snap: &Snapshot, csrf: &str) -> Markup {
+/// Período do gráfico de ocupação.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Period {
+    Day,
+    Week,
+}
+
+/// Ocupação das faixas ao longo do tempo (medições do histórico). `points`: (hora, em uso, total).
+pub fn occupancy_chart(points: &[(NaiveDateTime, u64, u64)], period: Period, now: NaiveDateTime) -> Markup {
+    let span = match period {
+        Period::Day => CDuration::hours(24),
+        Period::Week => CDuration::days(7),
+    };
+    let start = now - span;
+    let (w, h) = (720.0_f64, 140.0_f64);
+    let x = |t: NaiveDateTime| ((t - start).num_seconds() as f64 / span.num_seconds() as f64).clamp(0.0, 1.0) * w;
+    let pct = |u: u64, t: u64| if t == 0 { 0.0 } else { u as f64 * 100.0 / t as f64 };
+    let y = |p: f64| h - p.clamp(0.0, 100.0) / 100.0 * h;
+    let pts: Vec<(f64, f64, &(NaiveDateTime, u64, u64))> = points.iter().filter(|p| p.0 >= start).map(|p| (x(p.0), y(pct(p.1, p.2)), p)).collect();
+    let line: String = pts.iter().enumerate().map(|(i, (px, py, _))| format!("{}{px:.1},{py:.1}", if i == 0 { "M" } else { " L" })).collect();
+    let area = match (pts.first(), pts.last()) {
+        (Some(f), Some(l)) => format!("{line} L{:.1},{h} L{:.1},{h} Z", l.0, f.0),
+        _ => String::new(),
+    };
+    let peak = points.iter().filter(|p| p.0 >= start).max_by(|a, b| pct(a.1, a.2).total_cmp(&pct(b.1, b.2)));
+    let label_fmt = match period {
+        Period::Day => "%H:%M",
+        Period::Week => i18n::date_fmt(DateStyle::DayMonth),
+    };
+    let ticks: Vec<NaiveDateTime> = (0..5).map(|i| start + span / 4 * i).collect();
+    html! {
+        @if pts.is_empty() {
+            p.empty { (t("Ainda não há medições neste período. O painel registra a ocupação das faixas a cada 5 minutos.")) }
+        } @else {
+            div.chart.occ {
+                div.chart-y { span { "100%" } span { "50%" } span { "0%" } }
+                div.chart-plot {
+                    svg viewBox=(format!("0 0 {w} {h}")) preserveAspectRatio="none" role="img" aria-label=(t("Ocupação das faixas ao longo do tempo")) {
+                        line.grid x1="0" x2=(w) y1="0.5" y2="0.5" {}
+                        line.grid x1="0" x2=(w) y1=(h / 2.0) y2=(h / 2.0) {}
+                        line.grid x1="0" x2=(w) y1=(h - 0.5) y2=(h - 0.5) {}
+                        path.occ-area d=(area) {}
+                        path.occ-line d=(line) vector-effect="non-scaling-stroke" {}
+                        @for (px, py, p) in &pts {
+                            circle.occ-pt cx=(format!("{px:.1}")) cy=(format!("{py:.1}")) r="4" {
+                                title { (tf!("{}: {}% ({} de {} IPs)", p.0.format(i18n::date_fmt(DateStyle::Short)), format!("{:.0}", pct(p.1, p.2)), p.1, p.2)) }
+                            }
+                        }
+                    }
+                    div.chart-x { @for t in &ticks { span { (t.format(label_fmt)) } } }
+                }
+            }
+            @if let Some(p) = peak {
+                p.muted.small.occ-peak {
+                    (tf!("Pico no período: {}% ({} de {} IPs) em {}.", format!("{:.0}", pct(p.1, p.2)), p.1, p.2, p.0.format(i18n::date_fmt(DateStyle::Short))))
+                }
+            }
+        }
+    }
+}
+
+pub fn dashboard_body(snap: &Snapshot, csrf: &str, occupancy: Option<(Markup, Period)>) -> Markup {
     html! {
         section.grid.kpis #dash-kpis { (frag_dash_kpis(snap)) }
         section.grid.g-4-8 {
@@ -583,6 +646,18 @@ pub fn dashboard_body(snap: &Snapshot, csrf: &str) -> Markup {
             div.card {
                 div.card-head { h2.card-title { (t("Ocupação geral")) } }
                 div #dash-donut { (frag_dash_donut(snap)) }
+            }
+        }
+        @if let Some((chart, period)) = occupancy {
+            section.card #occupancy {
+                div.card-head {
+                    h2.card-title { (t("Ocupação ao longo do tempo")) }
+                    div.chips {
+                        a.chip.active[period == Period::Day] href="/?period=24h#occupancy" { (t("24 horas")) }
+                        a.chip.active[period == Period::Week] href="/?period=7d#occupancy" { (t("7 dias")) }
+                    }
+                }
+                (chart)
             }
         }
         section.card {
@@ -918,7 +993,15 @@ fn feed_table(events: &[&Event], now: NaiveDateTime, past: bool) -> Markup {
 
 // ---------- leases ----------
 
-pub fn leases_body(snap: &Snapshot, csrf: &str, state_file: &str, dev: Dev) -> Markup {
+/// Nome de um arquivo ou pasta, com o caminho completo ao passar o mouse (caminhos longos
+/// poluem a tela e dizem pouco a quem só usa o painel).
+pub fn path_code(p: &std::path::Path) -> Markup {
+    let full = p.display().to_string();
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| full.clone());
+    html! { code title=(full) { (name) } }
+}
+
+pub fn leases_body(snap: &Snapshot, csrf: &str, state_file: &std::path::Path, dev: Dev) -> Markup {
     html! {
         section.card {
             div.card-head {
@@ -928,7 +1011,7 @@ pub fn leases_body(snap: &Snapshot, csrf: &str, state_file: &str, dev: Dev) -> M
             div #lease-wrap { (frag_lease_table(snap, csrf, dev)) }
         }
         p.hint {
-            (tm("Lidos de {} e atualizados sozinhos. Para liberar um lease, o painel para o serviço por alguns segundos, tira o dispositivo do arquivo e inicia o serviço de novo; o dispositivo pede um IP novo na próxima renovação.", &[html! { code { (state_file) } }]))
+            (tm("Lidos de {} e atualizados sozinhos. Para liberar um lease, o painel para o serviço por alguns segundos, tira o dispositivo do arquivo e inicia o serviço de novo; o dispositivo pede um IP novo na próxima renovação.", &[path_code(state_file)]))
         }
     }
 }

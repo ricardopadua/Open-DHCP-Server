@@ -94,6 +94,8 @@ struct Inner {
     /// Notificações fechadas (chave → rev), guardadas no histórico para valer após reiniciar.
     remembered: HashMap<String, String>,
     last_prune: Option<Instant>,
+    /// Última medição de ocupação gravada: (intervalo de 5 min, em uso, total).
+    last_sample: Option<(chrono::NaiveDateTime, u64, u64)>,
 }
 
 pub struct Monitor {
@@ -130,6 +132,7 @@ impl Monitor {
                 note_id: 0,
                 remembered,
                 last_prune: None,
+                last_sample: None,
             }),
             extra: std::sync::Mutex::new(Vec::new()),
             history,
@@ -296,6 +299,19 @@ impl Monitor {
                     let keep: Vec<String> = inner.remembered.keys().cloned().collect();
                     h.forget_dismissed_except(&keep);
                 }
+            }
+        }
+
+        // ocupação das faixas a cada 5 minutos (para o gráfico ao longo do tempo)
+        if let Some(h) = &self.history {
+            let now_l = chrono::Local::now().naive_local();
+            let usage = crate::views::range_usage(&next.doc, &next.leases, crate::views::now_ts());
+            let (used, total) = usage.iter().fold((0, 0), |(u, t), r| (u + r.used, t + r.total));
+            let secs = now_l.and_utc().timestamp();
+            let bucket = chrono::DateTime::from_timestamp(secs - secs.rem_euclid(300), 0).map(|d| d.naive_utc()).unwrap_or(now_l);
+            if total > 0 && inner.last_sample != Some((bucket, used, total)) {
+                inner.last_sample = Some((bucket, used, total));
+                h.record_occupancy(bucket, used, total);
             }
         }
 

@@ -96,6 +96,8 @@ pub enum DateStyle {
     Full,
     /// só a data, com ano ("26/11/2026", "Nov 26, 2026")
     Day,
+    /// dia e mês ("26/11", "Nov 26")
+    DayMonth,
 }
 
 impl Lang {
@@ -107,6 +109,8 @@ impl Lang {
             (Lang::En, DateStyle::Full) => "%b %-d, %Y %H:%M:%S",
             (Lang::En, DateStyle::Day) => "%b %-d, %Y",
             (_, DateStyle::Day) => "%d/%m/%Y",
+            (Lang::En, DateStyle::DayMonth) => "%b %-d",
+            (_, DateStyle::DayMonth) => "%d/%m",
             (_, DateStyle::Short) => "%d/%m %H:%M",
             (_, DateStyle::ShortSecs) => "%d/%m %H:%M:%S",
             (_, DateStyle::Full) => "%d/%m/%Y %H:%M:%S",
