@@ -3,14 +3,69 @@
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
 
+  // Janela de confirmação do painel (no lugar do confirm() do navegador). Resolve true/false.
+  function askConfirm(message, submitter) {
+    const modal = $("#confirm-modal");
+    if (!modal) return Promise.resolve(window.confirm(message));
+    const ok = $("[data-act=ok]", modal);
+    const cancel = $("[data-act=cancel]", modal);
+    const okLabel = ok.dataset.label || (ok.dataset.label = ok.textContent);
+    const danger = !!(submitter && (submitter.classList.contains("soft-danger") || submitter.classList.contains("danger")));
+    $("#confirm-text", modal).textContent = message;
+    // o botão de confirmar repete a ação (ex.: "Desinstalar"), em vermelho quando é destrutiva
+    ok.textContent = (submitter && submitter.textContent.trim()) || okLabel;
+    ok.classList.toggle("danger", danger);
+    ok.classList.toggle("primary", !danger);
+    modal.classList.toggle("is-danger", danger);
+    const before = document.activeElement;
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("open"));
+    (danger ? cancel : ok).focus();
+    return new Promise((resolve) => {
+      const done = (value) => {
+        modal.classList.remove("open");
+        modal.hidden = true;
+        modal.removeEventListener("click", onClick);
+        document.removeEventListener("keydown", onKey, true);
+        if (before && before.focus) before.focus();
+        resolve(value);
+      };
+      const onClick = (e) => {
+        if (e.target === modal || e.target.closest("[data-act=cancel]")) done(false);
+        else if (e.target.closest("[data-act=ok]")) done(true);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          done(false);
+        } else if (e.key === "Tab") {
+          // foco preso nos dois botões
+          e.preventDefault();
+          (document.activeElement === ok ? cancel : ok).focus();
+        }
+      };
+      modal.addEventListener("click", onClick);
+      document.addEventListener("keydown", onKey, true);
+    });
+  }
+
   // confirmação e envio único
+  let confirmed = null;
   document.addEventListener("submit", (ev) => {
     const form = ev.target;
     const msg = form.getAttribute("data-confirm");
-    if (msg && !window.confirm(msg)) {
+    if (msg && confirmed !== form) {
       ev.preventDefault();
+      const submitter = ev.submitter || $("[type=submit]", form);
+      askConfirm(msg, submitter).then((yes) => {
+        if (!yes) return;
+        confirmed = form;
+        if (submitter && submitter.form === form) form.requestSubmit(submitter);
+        else form.requestSubmit();
+      });
       return;
     }
+    confirmed = null;
     // fechar notificação: sem recarregar a página (o fluxo ao vivo atualiza o resto)
     if (form.hasAttribute("data-ajax")) {
       ev.preventDefault();
