@@ -452,3 +452,27 @@ input:focus, textarea:focus { outline: none; border-color: rgb(var(--primary)); 
 .menu-item .ico { width: 1rem; height: 1rem; }
 .login-lang { position: fixed; top: 1rem; right: 1rem; z-index: 10; }
 .login-lang .icon-btn { background: rgb(var(--surface)); border: 1px solid rgb(var(--border)); }
+
+/* ---------- campos de rede ---------- */
+.field { display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.8rem; }
+.field > .label { font-weight: 600; }
+.field small { color: rgb(var(--muted)); }
+select {
+  font: inherit; font-weight: 400; font-size: 0.85rem; padding: 0.55rem 0.7rem; border-radius: 0.45rem;
+  border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); color: inherit;
+}
+html.dark select { background: rgb(35 38 40); }
+select:focus { outline: none; border-color: rgb(var(--primary)); box-shadow: 0 0 0 0.2rem rgb(var(--primary) / 0.15); }
+.input-group { display: flex; gap: 0.5rem; }
+.input-group > input { flex: 1 1 auto; min-width: 0; }
+.input-group > select { flex: 0 0 auto; }
+select.prefix { width: 9.5rem; font-family: var(--mono); font-size: 0.8rem; }
+.range-helper { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; font-weight: 400; }
+.range-helper input { width: 9.5rem; padding: 0.4rem 0.6rem; font-size: 0.8rem; }
+.range-helper #rh-count { width: 7.5rem; }
+.net-info { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.75rem; color: rgb(var(--muted)); font-weight: 400; }
+.net-info:empty { display: none; }
+.net-info .net { color: rgb(var(--info)); font-weight: 600; }
+.net-info .bad { color: rgb(var(--danger)); }
+.lease-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.lease-chips .chip { font-size: 0.72rem; padding: 0.2rem 0.6rem; border: 1px solid rgb(var(--border)); }

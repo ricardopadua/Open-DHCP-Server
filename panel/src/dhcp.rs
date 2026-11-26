@@ -270,6 +270,71 @@ pub fn delete_reservation(doc: &mut IniDoc, n: usize) -> Result<String, String> 
     Ok(r.mac)
 }
 
+// ---------- rede (máscara, prefixo, sub-rede) ----------
+
+/// Máscara do prefixo `/p` (0 a 32).
+pub fn mask_of(prefix: u8) -> Ipv4Addr {
+    Ipv4Addr::from(if prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix.min(32))) })
+}
+
+/// Prefixo de uma máscara contínua (`255.255.255.0` → 24).
+pub fn prefix_of(mask: Ipv4Addr) -> Option<u8> {
+    let bits = u32::from(mask);
+    (bits.leading_ones() + bits.trailing_zeros() == 32).then(|| bits.leading_ones() as u8)
+}
+
+/// (rede, broadcast) do IP com a máscara.
+pub fn net_bounds(ip: Ipv4Addr, mask: Ipv4Addr) -> (Ipv4Addr, Ipv4Addr) {
+    let (i, m) = (u32::from(ip), u32::from(mask));
+    (Ipv4Addr::from(i & m), Ipv4Addr::from((i & m) | !m))
+}
+
+/// Confere as faixas contra a máscara (cabem na mesma rede, sem o endereço de rede nem o
+/// broadcast) e os gateways (dentro da rede e fora das faixas, para não serem entregues).
+fn check_network(ranges: &[(Ipv4Addr, Ipv4Addr)], mask: Option<Ipv4Addr>, routers: &[Ipv4Addr]) -> Result<(), String> {
+    let Some(mask) = mask else { return Ok(()) };
+    let Some(prefix) = prefix_of(mask) else { return Ok(()) };
+    for (a, b) in ranges {
+        let (net, bcast) = net_bounds(*a, mask);
+        if net_bounds(*b, mask).0 != net {
+            return Err(tf!("A faixa {}-{} não cabe na rede {}/{} (máscara {}).", a, b, net, prefix, mask));
+        }
+        if prefix <= 30 && *a == net {
+            return Err(tf!("A faixa {}-{} começa no endereço de rede {}, que não pode ser entregue.", a, b, net));
+        }
+        if prefix <= 30 && *b == bcast {
+            return Err(tf!("A faixa {}-{} termina no broadcast {}, que não pode ser entregue.", a, b, bcast));
+        }
+    }
+    if let Some((first, _)) = ranges.first() {
+        let (net, _) = net_bounds(*first, mask);
+        for r in routers {
+            if net_bounds(*r, mask).0 != net {
+                return Err(tf!("O gateway {} está fora da rede {}/{} das faixas.", r, net, prefix));
+            }
+            if let Some((a, b)) = ranges.iter().find(|(a, b)| (u32::from(*a)..=u32::from(*b)).contains(&u32::from(*r))) {
+                return Err(tf!("O gateway {} está dentro da faixa {}-{}: ele poderia ser entregue a um dispositivo.", r, a, b));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Máscara e gateways que valerão para o conjunto: os dele ou, sem eles, os das opções globais.
+fn effective_net(doc: &IniDoc, o: &OptionsInput) -> Result<(Option<Ipv4Addr>, Vec<Ipv4Addr>), String> {
+    let g = globals(doc).opts;
+    let mask = match opt_mask(o.mask)? {
+        Some(m) => Some(m),
+        None => g.mask.as_deref().and_then(|m| opt_mask(m).ok().flatten()),
+    };
+    let routers = match opt_ip_list(&tf!("Gateway"), o.router)? {
+        Some(r) => Some(r),
+        None => g.router.as_deref().and_then(|r| opt_ip_list("", r).ok().flatten()),
+    };
+    let routers = routers.map(|r| r.split(", ").filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+    Ok((mask.and_then(|m| m.parse().ok()), routers))
+}
+
 // ---------- faixas ----------
 
 pub struct RangeSetInput<'a> {
@@ -315,6 +380,8 @@ fn check_overlaps(doc: &IniDoc, new: &[(Ipv4Addr, Ipv4Addr)], editing: Option<us
 pub fn add_range_set(doc: &mut IniDoc, input: &RangeSetInput) -> Result<usize, String> {
     let ranges = parse_ranges_text(input.ranges)?;
     check_overlaps(doc, &ranges, None)?;
+    let (mask, routers) = effective_net(doc, &input.opts)?;
+    check_network(&ranges, mask, &routers)?;
     let sets = doc.sections_named("RANGE_SET");
     // Fica junto dos outros [RANGE_SET] (a ordem importa: o primeiro completa opções de clientes
     // estáticos); sem nenhum, antes de [GLOBAL_OPTIONS] ou do primeiro cliente estático.
@@ -349,6 +416,8 @@ pub fn update_range_set(doc: &mut IniDoc, n: usize, input: &RangeSetInput) -> Re
     let sec = doc.sections_named("RANGE_SET").get(n).cloned().ok_or_else(|| tf!("Conjunto de faixas não encontrado"))?;
     let ranges = parse_ranges_text(input.ranges)?;
     check_overlaps(doc, &ranges, Some(n))?;
+    let (mask, routers) = effective_net(doc, &input.opts)?;
+    check_network(&ranges, mask, &routers)?;
     let values: Vec<String> = ranges.iter().map(|(a, b)| format!("{a}-{b}")).collect();
     doc.set_values(&sec, KEY_RANGE, &values);
     write_opts(doc, "RANGE_SET", n, &input.opts)
@@ -383,6 +452,36 @@ mod tests {
 
     fn sample() -> IniDoc {
         IniDoc::parse(include_str!("../../opendhcp.ini"))
+    }
+
+    #[test]
+    fn mascara_prefixo_e_rede() {
+        assert_eq!(mask_of(24), Ipv4Addr::new(255, 255, 255, 0));
+        assert_eq!(mask_of(26), Ipv4Addr::new(255, 255, 255, 192));
+        assert_eq!(mask_of(32), Ipv4Addr::new(255, 255, 255, 255));
+        assert_eq!(mask_of(0), Ipv4Addr::new(0, 0, 0, 0));
+        assert_eq!(prefix_of(Ipv4Addr::new(255, 255, 255, 192)), Some(26));
+        assert_eq!(prefix_of(Ipv4Addr::new(255, 0, 255, 0)), None);
+        let (net, b) = net_bounds(Ipv4Addr::new(192, 168, 0, 70), mask_of(26));
+        assert_eq!((net, b), (Ipv4Addr::new(192, 168, 0, 64), Ipv4Addr::new(192, 168, 0, 127)));
+    }
+
+    #[test]
+    fn faixa_precisa_caber_na_rede_e_gateway_fora_dela() {
+        let r = |a: &str, b: &str| (a.parse().unwrap(), b.parse().unwrap());
+        let m = Some(mask_of(26));
+        let gw: Vec<Ipv4Addr> = vec!["192.168.0.65".parse().unwrap()];
+        assert!(check_network(&[r("192.168.0.66", "192.168.0.126")], m, &gw).is_ok());
+        assert!(check_network(&[r("192.168.0.66", "192.168.0.130")], m, &gw).unwrap_err().contains("não cabe"));
+        assert!(check_network(&[r("192.168.0.64", "192.168.0.100")], m, &[]).unwrap_err().contains("endereço de rede"));
+        assert!(check_network(&[r("192.168.0.66", "192.168.0.127")], m, &[]).unwrap_err().contains("broadcast"));
+        assert!(check_network(&[r("192.168.0.60", "192.168.0.70")], None, &[]).is_ok(), "sem máscara não confere");
+        let gw_in: Vec<Ipv4Addr> = vec!["192.168.0.70".parse().unwrap()];
+        assert!(check_network(&[r("192.168.0.66", "192.168.0.126")], m, &gw_in).unwrap_err().contains("dentro da faixa"));
+        let gw_out: Vec<Ipv4Addr> = vec!["10.0.0.1".parse().unwrap()];
+        assert!(check_network(&[r("192.168.0.66", "192.168.0.126")], m, &gw_out).unwrap_err().contains("fora da rede"));
+        // /31 e /32: todos os endereços valem
+        assert!(check_network(&[r("10.0.0.0", "10.0.0.1")], Some(mask_of(31)), &[]).is_ok());
     }
 
     fn opts<'a>() -> OptionsInput<'a> {
