@@ -88,18 +88,8 @@
 
   // tempo real (Server-Sent Events)
   const page = document.body.getAttribute("data-live");
-  const pill = $("#live-pill");
-
-  function setLive(state) {
-    if (!pill) return;
-    pill.classList.toggle("on", state);
-    pill.classList.toggle("off", !state);
-    $(".txt", pill).textContent = state ? "Ao vivo" : "Reconectando";
-  }
-
   if (page && window.EventSource) {
     const es = new EventSource("/live?page=" + encodeURIComponent(page));
-    es.addEventListener("open", () => setLive(true));
     // Desconectado: a cada 4 s confere se o painel voltou. Sem sessão (painel reiniciado ou
     // sessão expirada) vai para o login; com sessão e o fluxo fechado, recarrega a página.
     let probe = null;
@@ -118,7 +108,6 @@
         })
         .catch(() => {});
     es.addEventListener("error", () => {
-      setLive(false);
       if (!probe) {
         check();
         probe = setInterval(check, 4000);
@@ -128,7 +117,6 @@
       window.location.href = "/login";
     });
     es.addEventListener("patch", (ev) => {
-      setLive(true);
       let data;
       try {
         data = JSON.parse(ev.data);
@@ -144,7 +132,5 @@
       applyFilters();
     });
     window.addEventListener("pagehide", () => es.close());
-  } else {
-    setLive(false);
   }
 })();

@@ -342,7 +342,6 @@ pub fn shell(s: Shell, snap: &Snapshot, body: Markup) -> Markup {
                                     summary.icon-btn #notif-btn aria-label="Notificações" title="Notificações" { (frag_notif_btn(snap)) }
                                     div.notif-panel #notif-list { (frag_notif_list(snap, s.csrf)) }
                                 }
-                                span.live-pill #live-pill title="Atualização em tempo real" { span.dot {} span.txt { "Conectando" } }
                                 button.icon-btn type="button" data-theme-toggle aria-label="Alternar tema" title="Alternar tema claro/escuro" {
                                     span.only-light { (icon("moon")) } span.only-dark { (icon("sun")) }
                                 }
