@@ -208,7 +208,10 @@ async fn host_guard(State(app): State<Shared>, req: Request, next: Next) -> Resp
         return (StatusCode::MISDIRECTED_REQUEST, "Host not allowed").into_response();
     }
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+        // "null" é o que o navegador manda quando não informa a origem (políticas de referrer,
+        // alguns WebViews): nesse caso valem o token CSRF e o cookie SameSite=Strict; o DNS
+        // rebinding já foi barrado pelo Host acima
+        if let Some(origin) = req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()).filter(|o| *o != "null") {
             let same = origin.split_once("://").is_some_and(|(_, h)| h.eq_ignore_ascii_case(host));
             if !same {
                 tracing::warn!(%origin, %host, "pedido recusado: origem diferente");
@@ -234,7 +237,8 @@ async fn security_headers(State(app): State<Shared>, req: Request, next: Next) -
     );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    // same-origin (e não no-referrer): com no-referrer o navegador manda "Origin: null" nos POSTs
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("same-origin"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
 }
