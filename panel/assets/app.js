@@ -297,11 +297,80 @@
     }
   });
 
-  // ---------- atividade: escolher o dia no calendário já abre o dia ----------
-  document.addEventListener("change", (ev) => {
-    const el = ev.target;
-    if (el.matches && el.matches("[data-autosubmit]") && el.value) el.form.submit();
-  });
+  // ---------- calendário (flatpickr, mesmo visual do NCI) ----------
+  // O valor enviado continua ISO (aaaa-mm-dd); só o texto exibido segue o idioma.
+  const FP_LOCALES = {
+    pt: {
+      weekdays: {
+        shorthand: ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"],
+        longhand: ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"],
+      },
+      months: {
+        shorthand: ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"],
+        longhand: ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"],
+      },
+      firstDayOfWeek: 0,
+    },
+    fr: {
+      weekdays: {
+        shorthand: ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"],
+        longhand: ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"],
+      },
+      months: {
+        shorthand: ["Janv", "Févr", "Mars", "Avr", "Mai", "Juin", "Juil", "Août", "Sept", "Oct", "Nov", "Déc"],
+        longhand: ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"],
+      },
+      firstDayOfWeek: 1,
+    },
+    es: {
+      weekdays: {
+        shorthand: ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"],
+        longhand: ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"],
+      },
+      months: {
+        shorthand: ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"],
+        longhand: ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"],
+      },
+      firstDayOfWeek: 1,
+    },
+  };
+
+  function initDates() {
+    if (!window.flatpickr) return;
+    const lang = (document.documentElement.lang || "pt").slice(0, 2);
+    $$("input[data-date]").forEach((el) => {
+      if (el._flatpickr) return;
+      window.flatpickr(el, {
+        locale: FP_LOCALES[lang] || "default",
+        dateFormat: "Y-m-d",
+        altInput: true,
+        altInputClass: el.className,
+        altFormat: lang === "en" ? "M j, Y" : "d/m/Y",
+        minDate: el.getAttribute("min") || null,
+        maxDate: el.getAttribute("max") || null,
+        disableMobile: true,
+        monthSelectorType: "static",
+        position: "auto",
+        onReady: (_sel, _str, fp) => {
+          fp.calendarContainer.classList.add("odp-cal");
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "odp-today-btn";
+          btn.textContent = el.getAttribute("data-t-today") || "Today";
+          btn.addEventListener("click", () => {
+            fp.setDate(new Date(), true);
+            fp.close();
+          });
+          fp.calendarContainer.appendChild(btn);
+        },
+        // atividade: escolher o dia já abre o dia
+        onChange: (_sel, str) => {
+          if (str && el.hasAttribute("data-autosubmit")) el.form.submit();
+        },
+      });
+    });
+  }
+  initDates();
 
   // ---------- importar CSV: o arquivo escolhido vai para a caixa de texto ----------
   document.addEventListener("change", (ev) => {

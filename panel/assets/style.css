@@ -542,10 +542,8 @@ dl.opts.dev-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 /* ---------- histórico por dia ---------- */
 .day-nav { display: flex; align-items: center; gap: 0.4rem; }
-.day-nav input[type="date"] { width: auto; padding: 0.35rem 0.55rem; font-size: 0.8rem; }
 .day-nav .icon-btn { text-decoration: none; font-size: 1.1rem; line-height: 1; }
 .day-summary { margin: 0 0 1rem; }
-html.dark input[type="date"] { color-scheme: dark; }
 
 /* ---------- ocupação ao longo do tempo ---------- */
 .chart.occ { height: 11rem; }
@@ -572,3 +570,54 @@ table.diff tr.gap td { color: rgb(var(--muted)); background: rgb(var(--surface-2
 .diff-legend { margin: 0 0 0.75rem; }
 .occ-peak { margin: 0.75rem 0 0; text-align: center; }
 .chart.occ .chart-plot svg { flex: 1 1 0; min-height: 0; height: auto; }
+
+/* ---------- calendário (flatpickr, mesmo visual do NCI) ---------- */
+.flatpickr-calendar.odp-cal {
+  z-index: 3000; width: 17.5rem; box-sizing: border-box; padding: 0.375rem;
+  border: 1px solid rgb(var(--border)); border-radius: 0.75rem;
+  background: rgb(var(--surface)); color: rgb(var(--text));
+  box-shadow: 0 10px 24px -8px rgb(0 0 0 / 0.2), 0 2px 6px -2px rgb(0 0 0 / 0.08);
+  font-family: inherit;
+}
+html.dark .flatpickr-calendar.odp-cal { box-shadow: 0 10px 24px -8px rgb(0 0 0 / 0.65); }
+.flatpickr-calendar.odp-cal:before, .flatpickr-calendar.odp-cal:after { display: none; }
+.odp-cal .flatpickr-innerContainer, .odp-cal .flatpickr-rContainer, .odp-cal .flatpickr-days,
+.odp-cal .flatpickr-weekdays, .odp-cal .flatpickr-weekdaycontainer, .odp-cal .dayContainer { width: 100%; min-width: 100%; max-width: 100%; }
+.odp-cal .flatpickr-months, .odp-cal .flatpickr-month, .odp-cal .flatpickr-weekdays,
+.odp-cal span.flatpickr-weekday { background: transparent !important; }
+.odp-cal .flatpickr-months { padding: 0.125rem 0 0.375rem; align-items: center; }
+.odp-cal .flatpickr-current-month {
+  display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+  padding: 0; height: 1.75rem; line-height: 1.75rem; font-size: 0.875rem;
+}
+.odp-cal .flatpickr-current-month .numInputWrapper { width: 3.25rem; }
+.odp-cal .flatpickr-current-month input.cur-year { padding: 0; height: auto; color: rgb(var(--muted)); font-weight: 500; border: 0; background: transparent; }
+.odp-cal .flatpickr-prev-month svg, .odp-cal .flatpickr-next-month svg { width: 0.8rem; height: 0.8rem; }
+.odp-cal .flatpickr-month, .odp-cal .flatpickr-current-month, .odp-cal .cur-month {
+  color: rgb(var(--text)); fill: rgb(var(--text)); font-weight: 600;
+}
+.odp-cal .flatpickr-prev-month, .odp-cal .flatpickr-next-month {
+  color: rgb(var(--muted)); fill: rgb(var(--muted)); border-radius: 0.5rem; top: 0.35rem; transition: background 0.15s;
+}
+.odp-cal .flatpickr-prev-month:hover, .odp-cal .flatpickr-next-month:hover { background: rgb(var(--primary) / 0.12); }
+.odp-cal .flatpickr-prev-month:hover svg, .odp-cal .flatpickr-next-month:hover svg { fill: rgb(var(--primary)); }
+.odp-cal .flatpickr-prev-month.flatpickr-disabled, .odp-cal .flatpickr-next-month.flatpickr-disabled { display: none; }
+.odp-cal span.flatpickr-weekday { color: rgb(var(--muted)); font-size: 0.625rem; font-weight: 600; text-transform: uppercase; }
+.odp-cal .flatpickr-day {
+  max-width: none; width: 14.2857%; height: 2rem; line-height: 2rem; border: 0; border-radius: 0.4rem;
+  font-size: 0.8125rem; color: rgb(var(--text)); transition: background 0.12s, color 0.12s;
+}
+.odp-cal .flatpickr-day:hover, .odp-cal .flatpickr-day:focus { background: rgb(var(--primary) / 0.14); }
+.odp-cal .flatpickr-day.prevMonthDay, .odp-cal .flatpickr-day.nextMonthDay,
+.odp-cal .flatpickr-day.flatpickr-disabled, .odp-cal .flatpickr-day.flatpickr-disabled:hover { color: rgb(var(--muted)); opacity: 0.55; background: transparent; }
+.odp-cal .flatpickr-day.today { background: transparent; box-shadow: inset 0 0 0 1px rgb(var(--primary)); color: rgb(var(--primary)); font-weight: 600; }
+.odp-cal .flatpickr-day.selected, .odp-cal .flatpickr-day.selected:hover {
+  background: rgb(var(--primary)); color: #fff; font-weight: 600; box-shadow: 0 4px 10px -2px rgb(var(--primary) / 0.5);
+}
+.odp-cal .odp-today-btn {
+  display: block; width: 100%; margin-top: 0.25rem; padding: 0.375rem; border: 0;
+  border-top: 1px solid rgb(var(--border)); border-radius: 0 0 0.5rem 0.5rem; background: transparent;
+  color: rgb(var(--primary)); font: inherit; font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+.odp-cal .odp-today-btn:hover { background: rgb(var(--primary) / 0.1); }
+.day-nav input.date-input { width: 9.5rem; cursor: pointer; padding: 0.35rem 0.6rem; font-size: 0.8rem; }
