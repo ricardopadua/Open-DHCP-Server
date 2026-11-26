@@ -11,6 +11,25 @@
       ev.preventDefault();
       return;
     }
+    // fechar notificação: sem recarregar a página (o fluxo ao vivo atualiza o resto)
+    if (form.hasAttribute("data-ajax")) {
+      ev.preventDefault();
+      const item = form.closest(".alert, .note");
+      if (item) item.hidden = true;
+      const undo = () => {
+        if (item) item.hidden = false;
+      };
+      fetch(form.action, {
+        method: "POST",
+        headers: { "x-requested-with": "fetch" },
+        body: new URLSearchParams(new FormData(form)),
+      })
+        .then((r) => {
+          if (!r.ok) undo();
+        })
+        .catch(undo);
+      return;
+    }
     $$("button[type=submit]", form).forEach((b) => {
       b.disabled = true;
       b.classList.add("busy");
@@ -37,6 +56,11 @@
     });
   }
 
+  document.addEventListener("keydown", (ev) => {
+    const notif = $("#notif");
+    if (ev.key === "Escape" && notif && notif.open) notif.open = false;
+  });
+
   document.addEventListener("input", (ev) => {
     if (ev.target.hasAttribute && ev.target.hasAttribute("data-filter")) applyFilters();
   });
@@ -53,6 +77,11 @@
       document.documentElement.classList.toggle("dark", dark);
       localStorage.setItem("odp-theme", dark ? "dark" : "light");
     }
+    const close = ev.target.closest("[data-close]");
+    if (close) close.closest(".alert").hidden = true;
+    // fecha a lista de notificações ao clicar fora dela
+    const notif = $("#notif");
+    if (notif && notif.open && !ev.target.closest("#notif")) notif.open = false;
     const tog = ev.target.closest("[data-toggle=side]");
     if (tog) document.body.classList.toggle("side-open");
   });

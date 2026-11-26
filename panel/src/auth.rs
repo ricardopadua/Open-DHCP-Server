@@ -93,6 +93,15 @@ impl Sessions {
         }
     }
 
+    /// Depois de trocar usuário/senha: encerra as outras sessões e atualiza o nome nesta.
+    pub fn keep_only(&self, token: &str, user: &str) {
+        let mut map = self.map.lock().unwrap();
+        map.retain(|t, _| t == token);
+        if let Some(s) = map.get_mut(token) {
+            s.user = user.to_string();
+        }
+    }
+
     pub fn remove(&self, token: &str) {
         self.map.lock().unwrap().remove(token);
     }

@@ -11,6 +11,7 @@ mod fsutil;
 mod ini;
 mod leases;
 mod monitor;
+mod notes;
 mod service;
 mod views;
 mod web;
@@ -63,7 +64,7 @@ fn hash_password() -> anyhow::Result<()> {
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line).context("não consegui ler a senha")?;
     let pass = line.trim_end_matches(['\r', '\n']);
-    if pass.chars().count() < 8 {
+    if pass.chars().count() < 8 && pass != web::DEFAULT_PASSWORD {
         bail!("use uma senha com pelo menos 8 caracteres");
     }
     println!("{}", auth::hash_password(pass)?);
@@ -83,7 +84,7 @@ async fn serve(path: PathBuf) -> anyhow::Result<()> {
     }
     let monitor = monitor::Monitor::new(cfg.clone());
     tokio::spawn(monitor.clone().run());
-    let app = web::router(cfg, monitor);
+    let app = web::router(cfg, monitor, path);
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("não consegui abrir {listen}"))?;
     tracing::info!("painel em http://{listen}");
     // Sem "graceful shutdown": as conexões ao vivo (SSE) ficam abertas e ele esperaria para sempre.

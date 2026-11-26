@@ -100,3 +100,51 @@ impl Config {
         Ok(cfg)
     }
 }
+
+/// Troca `username` e `password_hash` da seção `[auth]` no texto do panel.toml, mantendo o resto
+/// (comentários, ordem) como está. O resultado é conferido relendo o TOML.
+pub fn set_auth(text: &str, username: &str, hash: &str) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut section = String::new();
+    let (mut user_done, mut hash_done) = (false, false);
+    for line in text.split_inclusive('\n') {
+        let t = line.trim();
+        if t.starts_with('[') {
+            section = t.trim_matches(|c| c == '[' || c == ']').trim().to_string();
+        }
+        let key = t.split('=').next().unwrap_or("").trim();
+        let nl = if line.ends_with('\n') { "\n" } else { "" };
+        if section == "auth" && t.contains('=') && !t.starts_with('#') && key == "username" {
+            out.push_str(&format!("username = \"{username}\"{nl}"));
+            user_done = true;
+        } else if section == "auth" && t.contains('=') && !t.starts_with('#') && key == "password_hash" {
+            out.push_str(&format!("password_hash = \"{hash}\"{nl}"));
+            hash_done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !(user_done && hash_done) {
+        bail!("não encontrei username e password_hash na seção [auth]");
+    }
+    let cfg: Config = toml::from_str(&out).context("o panel.toml ficaria inválido")?;
+    if cfg.auth.username != username || cfg.auth.password_hash != hash {
+        bail!("o panel.toml não ficou com os valores esperados");
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_auth_keeps_rest() {
+        let text = "# topo\nini_file = \"/x.ini\"\n\n[auth]\n# comentário\nusername = \"admin\"\npassword_hash = \"$argon2id$a\"\n\n[service]\nstatus = [\"true\"]\nstart = [\"true\"]\nstop = [\"true\"]\nrestart = [\"true\"]\n";
+        let out = set_auth(text, "ricardo", "$argon2id$b").unwrap();
+        assert!(out.contains("# comentário\nusername = \"ricardo\"\npassword_hash = \"$argon2id$b\"\n"));
+        assert!(out.starts_with("# topo\nini_file"));
+        assert!(out.contains("[service]\nstatus"));
+        assert!(set_auth("ini_file = \"/x\"\n", "a", "b").is_err());
+    }
+}

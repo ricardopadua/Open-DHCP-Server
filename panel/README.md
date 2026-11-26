@@ -23,6 +23,7 @@ Rust. É um programa separado: **o servidor DHCP (`opendhcpd`) não muda**. O pa
 | Reservas | IP fixo por MAC (`[00:11:22:33:44:55]` + `IP=`), nome do host, bloqueio de dispositivo, se está com IP agora |
 | Faixas | `[RANGE_SET]`: faixas `DHCPRange`, máscara, gateway, DNS e tempo de lease, com a ocupação de cada faixa |
 | Opções globais | `[GLOBAL_OPTIONS]`: domínio, máscara, gateway, DNS e lease padrão |
+| Minha conta | Troca o usuário e a senha do painel (grava o novo hash no `panel.toml` e encerra as outras sessões) |
 
 **Alertas** no topo de todas as telas: serviço parado, faixa com 80%/90% ocupada, pedidos de IP
 sem faixa correspondente (dispositivos sem rede) e conflitos de IP nos últimos 15 minutos.
@@ -52,7 +53,7 @@ cargo build --release
 sudo install -m 755 target/release/opendhcp-panel /usr/local/bin/
 sudo mkdir -p /etc/opendhcp-panel
 sudo cp panel.example.toml /etc/opendhcp-panel/panel.toml
-opendhcp-panel hash-password            # cole o hash em [auth] password_hash
+echo admin | opendhcp-panel hash-password   # cole o hash em [auth] password_hash
 sudo cp opendhcp.service opendhcp-panel.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now opendhcp opendhcp-panel
@@ -60,6 +61,8 @@ sudo systemctl enable --now opendhcp opendhcp-panel
 
 Ajuste em `panel.toml` os caminhos `ini_file`, `state_file` e `log_file` para os mesmos usados no
 `opendhcpd` (`-i`, `-s` e `-l`). O painel abre em `http://127.0.0.1:8067`.
+Com a senha de fábrica `admin`, todas as telas mostram um aviso até ela ser trocada em
+**Minha conta**.
 
 ## Segurança
 

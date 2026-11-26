@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::events::{self, Event};
 use crate::ini::IniDoc;
 use crate::leases::{self, Lease};
+use crate::notes::{self, Alert, Note};
 use crate::service::{self, Status};
 
 /// Quantos eventos do log ficam em memória.
@@ -43,6 +44,8 @@ pub struct Snapshot {
     /// Mais antigo primeiro.
     pub events: VecDeque<Event>,
     pub log: LogInfo,
+    /// Notificações (alertas que a pessoa lê e fecha).
+    pub notes: Vec<Note>,
     pub updated: chrono::DateTime<chrono::Local>,
 }
 
@@ -58,6 +61,7 @@ impl Snapshot {
             fresh: HashMap::new(),
             events: VecDeque::new(),
             log: LogInfo::default(),
+            notes: Vec::new(),
             updated: chrono::Local::now(),
         }
     }
@@ -83,6 +87,7 @@ struct Inner {
     seq: u64,
     tick: u64,
     last_bump: Instant,
+    note_id: u64,
 }
 
 pub struct Monitor {
@@ -90,6 +95,8 @@ pub struct Monitor {
     snap: RwLock<Arc<Snapshot>>,
     tx: watch::Sender<u64>,
     inner: tokio::sync::Mutex<Inner>,
+    /// Alertas que vêm do painel e não dos arquivos (senha padrão, reinício pendente).
+    extra: std::sync::Mutex<Vec<Alert>>,
 }
 
 fn sig(path: &std::path::Path) -> Sig {
@@ -112,7 +119,9 @@ impl Monitor {
                 seq: 0,
                 tick: 0,
                 last_bump: Instant::now(),
+                note_id: 0,
             }),
+            extra: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -130,6 +139,36 @@ impl Monitor {
         loop {
             every.tick().await;
             self.tick(false).await;
+        }
+    }
+
+    /// Liga um alerta do painel; aparece na próxima leitura (até 1 s).
+    pub fn put_extra(&self, alert: Alert) {
+        let mut extra = self.extra.lock().unwrap();
+        extra.retain(|a| a.key != alert.key);
+        extra.push(alert);
+    }
+
+    /// Liga (`Some`) ou desliga (`None`) um alerta do próprio painel, identificado por `key`.
+    pub async fn set_extra(&self, key: &str, alert: Option<Alert>) {
+        {
+            let mut extra = self.extra.lock().unwrap();
+            extra.retain(|a| a.key != key);
+            extra.extend(alert);
+        }
+        self.tick(false).await;
+    }
+
+    /// Fecha uma notificação (ou todas, com `None`).
+    pub async fn dismiss(&self, id: Option<u64>) {
+        let _inner = self.inner.lock().await;
+        let old = self.snapshot();
+        let mut next: Snapshot = (*old).clone();
+        if notes::dismiss(&mut next.notes, id) {
+            next.version = old.version + 1;
+            let v = next.version;
+            *self.snap.write().unwrap() = Arc::new(next);
+            let _ = self.tx.send(v);
         }
     }
 
@@ -206,6 +245,13 @@ impl Monitor {
             next.status = service::status(&self.cfg.service).await;
             changed |= next.status != old.status;
         }
+
+        // notificações
+        let mut current = crate::views::alerts(&next, crate::views::now_ts(), crate::views::now_local());
+        current.extend(self.extra.lock().unwrap().iter().cloned());
+        let mut id = inner.note_id;
+        changed |= notes::sync(&mut next.notes, current, chrono::Local::now(), &mut id);
+        inner.note_id = id;
 
         // destaques que venceram e relógio relativo ("em 3 min") a cada 30 s
         let before = next.fresh.len();

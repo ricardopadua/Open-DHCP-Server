@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::{ConnectInfo, FromRequestParts, Path as UrlPath, Query, Request, State};
@@ -25,6 +25,7 @@ use crate::dhcp::{self, OptionsInput, RangeSetInput, ReservationInput};
 use crate::ini::IniDoc;
 use crate::leases;
 use crate::monitor::{Monitor, Snapshot};
+use crate::notes::{Alert, NoteAction};
 use crate::service::{self, Action, Status};
 use crate::views::{self, csrf_input, error_box, icon, Shell};
 
@@ -38,20 +39,51 @@ pub struct App {
     pub sessions: Sessions,
     pub monitor: Arc<Monitor>,
     write_lock: tokio::sync::Mutex<()>,
-    pending_restart: AtomicBool,
+    /// panel.toml (gravado quando a pessoa troca usuário/senha em "Minha conta").
+    config_path: PathBuf,
+    /// (usuário, hash) atuais; começam com os do panel.toml.
+    creds: RwLock<(String, String)>,
+    default_password: AtomicBool,
+    restart_rev: std::sync::atomic::AtomicU64,
 }
+
+fn restart_alert(app: &App) -> Alert {
+    Alert {
+        rev: app.restart_rev.load(Ordering::SeqCst).to_string(), // cada alteração nova avisa de novo
+        action: Some(NoteAction::Service("restart", "Reiniciar agora", "Reiniciar o servidor DHCP agora?")),
+        ..Alert::new("restart", "info", "A configuração mudou. Reinicie o serviço para o DHCP passar a usar as alterações.")
+    }
+}
+
+fn password_alert() -> Alert {
+    Alert {
+        action: Some(NoteAction::Link("/account", "Trocar senha")),
+        ..Alert::new("default-password", "warn", "Você está usando a senha padrão. Troque-a para proteger o painel.")
+    }
+}
+
+/// Senha de fábrica: o painel avisa até que ela seja trocada.
+pub const DEFAULT_PASSWORD: &str = "admin";
 
 type Shared = Arc<App>;
 type Fields = HashMap<String, String>;
 
-pub fn router(cfg: Config, monitor: Arc<Monitor>) -> Router {
+pub fn router(cfg: Config, monitor: Arc<Monitor>, config_path: PathBuf) -> Router {
+    let default_password = auth::verify_password(DEFAULT_PASSWORD, &cfg.auth.password_hash);
+    let creds = RwLock::new((cfg.auth.username.clone(), cfg.auth.password_hash.clone()));
     let app = Arc::new(App {
+        config_path,
+        creds,
+        default_password: AtomicBool::new(default_password),
+        restart_rev: std::sync::atomic::AtomicU64::new(0),
         cfg,
         sessions: Sessions::default(),
         monitor,
         write_lock: tokio::sync::Mutex::new(()),
-        pending_restart: AtomicBool::new(false),
     });
+    if default_password {
+        app.monitor.put_extra(password_alert());
+    }
     Router::new()
         .route("/", get(dashboard))
         .route("/live", get(live))
@@ -70,6 +102,8 @@ pub fn router(cfg: Config, monitor: Arc<Monitor>) -> Router {
         .route("/ranges/{n}/delete", post(range_delete))
         .route("/options", get(options_page).post(options_update))
         .route("/service/{action}", post(service_action))
+        .route("/account", get(account_page).post(account_update))
+        .route("/notes/dismiss", post(dismiss_note))
         .route("/static/style.css", get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], CSS) }))
         .route("/static/app.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], JS) }))
         .route("/static/theme.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], THEME_JS) }))
@@ -143,7 +177,6 @@ fn page(app: &App, ctx: &Ctx, title: &str, nav: &str, live: &str, body: Markup) 
             user: &ctx.s.user,
             csrf: &ctx.s.csrf,
             flash: ctx.s.flash.as_ref().map(|f| (f.ok, f.text.as_str())),
-            pending_restart: app.pending_restart.load(Ordering::SeqCst),
         },
         &snap,
         body,
@@ -198,10 +231,11 @@ async fn mutate_ini<T>(
         crate::fsutil::backup(path, &app.cfg.backup_dir, app.cfg.backups_keep)
             .map_err(|e| format!("não consegui fazer o backup em {}: {e}", app.cfg.backup_dir.display()))?;
         crate::fsutil::write_atomic(path, &bytes).map_err(|e| format!("não consegui gravar {}: {e}", path.display()))?;
-        app.pending_restart.store(true, Ordering::SeqCst);
+        app.restart_rev.fetch_add(1, Ordering::SeqCst);
         tracing::info!(file = %path.display(), "configuração alterada pelo painel");
         out
     };
+    app.monitor.set_extra("restart", Some(restart_alert(app))).await;
     app.monitor.poke().await;
     Ok(out)
 }
@@ -215,13 +249,14 @@ struct LiveQuery {
 
 /// Pedaços (seletor -> HTML) que a página `page` atualiza.
 fn live_patch(snap: &Snapshot, page: &str, csrf: &str) -> serde_json::Map<String, serde_json::Value> {
-    let now = views::now_ts();
     let mut m = serde_json::Map::new();
     let mut put = |k: &str, v: Markup| {
         m.insert(k.to_string(), serde_json::Value::String(v.into_string()));
     };
     put("#svc-badge", views::status_badge(snap.status));
-    put("#alerts", views::frag_alerts(snap, now));
+    put("#alerts", views::frag_alerts(snap, csrf));
+    put("#notif-btn", views::frag_notif_btn(snap));
+    put("#notif-list", views::frag_notif_list(snap, csrf));
     put("#updated", views::frag_updated(snap));
     match page {
         "dashboard" => {
@@ -286,9 +321,9 @@ async fn login(
     }
     let user = field(&f, "username").to_string();
     let pass = field(&f, "password").to_string();
-    let hash = app.cfg.auth.password_hash.clone();
+    let (username, hash) = app.creds.read().unwrap().clone();
     let pass_ok = tokio::task::spawn_blocking(move || auth::verify_password(&pass, &hash)).await.unwrap_or(false);
-    let ok = pass_ok && auth::ct_eq(&user, &app.cfg.auth.username);
+    let ok = pass_ok && auth::ct_eq(&user, &username);
     if !ok {
         app.sessions.record_fail(ip);
         tracing::warn!(%ip, "login recusado");
@@ -355,7 +390,7 @@ async fn service_action(
     match result {
         Ok(()) => {
             if matches!(act, Action::Start | Action::Restart) {
-                app.pending_restart.store(false, Ordering::SeqCst);
+                app.monitor.set_extra("restart", None).await;
             }
             let msg = match act {
                 Action::Start => "Serviço iniciado.",
@@ -817,5 +852,119 @@ async fn options_update(State(app): State<Shared>, ctx: Ctx, Form(f): Form<Field
             let form = options_form(&ctx.s.csrf, field(&f, "rev"), [domain, opts.mask, opts.router, opts.dns, opts.lease], &[], Some(&e));
             (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, "Opções globais", "options", "other", form)).into_response()
         }
+    }
+}
+
+// ---------- minha conta ----------
+
+fn account_form(csrf: &str, user: &str, err: Option<&str>) -> Markup {
+    html! {
+        (error_box(err))
+        form.card.form method="post" action="/account" autocomplete="off" {
+            (csrf_input(csrf))
+            div.fields {
+                label { "Usuário" input name="username" value=(user) required maxlength="32" autocomplete="username";
+                    small { "Letras, números, ponto, hífen ou sublinhado." } }
+                label { "Senha atual" input type="password" name="current" required autocomplete="current-password"; }
+                label { "Nova senha" input type="password" name="new" required minlength="8" autocomplete="new-password";
+                    small { "Pelo menos 8 caracteres." } }
+                label { "Repita a nova senha" input type="password" name="confirm" required minlength="8" autocomplete="new-password"; }
+            }
+            div.form-actions {
+                a.btn.light href="/" { "Cancelar" }
+                button.btn.primary type="submit" { (icon("check")) "Salvar" }
+            }
+        }
+        p.muted.small { "Ao salvar, as outras sessões abertas do painel são encerradas. A nova senha fica gravada (em hash) no "
+            span.mono { "panel.toml" } "." }
+    }
+}
+
+async fn account_page(State(app): State<Shared>, ctx: Ctx) -> Response {
+    let body = account_form(&ctx.s.csrf, &ctx.s.user, None);
+    page(&app, &ctx, "Minha conta", "account", "other", body).into_response()
+}
+
+fn valid_username(u: &str) -> bool {
+    (1..=32).contains(&u.len()) && u.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+async fn account_update(State(app): State<Shared>, ConnectInfo(peer): ConnectInfo<SocketAddr>, ctx: Ctx, Form(f): Form<Fields>) -> Response {
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let user = field(&f, "username").trim().to_string();
+    let (new, confirm) = (field(&f, "new").to_string(), field(&f, "confirm").to_string());
+    let fail = |msg: &str| {
+        let body = account_form(&ctx.s.csrf, &user, Some(msg));
+        (StatusCode::UNPROCESSABLE_ENTITY, page(&app, &ctx, "Minha conta", "account", "other", body)).into_response()
+    };
+    if app.sessions.locked_out(peer.ip()) {
+        return fail("Muitas tentativas. Aguarde 5 minutos.");
+    }
+    let current_hash = app.creds.read().unwrap().1.clone();
+    let current = field(&f, "current").to_string();
+    let ok = tokio::task::spawn_blocking(move || auth::verify_password(&current, &current_hash)).await.unwrap_or(false);
+    if !ok {
+        app.sessions.record_fail(peer.ip());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        return fail("A senha atual está errada.");
+    }
+    if !valid_username(&user) {
+        return fail("Usuário inválido: use de 1 a 32 letras, números, ponto, hífen ou sublinhado.");
+    }
+    if new.chars().count() < 8 {
+        return fail("A nova senha precisa ter pelo menos 8 caracteres.");
+    }
+    if new != confirm {
+        return fail("A confirmação não confere com a nova senha.");
+    }
+    let hash = match tokio::task::spawn_blocking(move || auth::hash_password(&new)).await {
+        Ok(Ok(h)) => h,
+        _ => return fail("Não consegui gerar o hash da senha."),
+    };
+    let saved = {
+        let _guard = app.write_lock.lock().await;
+        std::fs::read_to_string(&app.config_path)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| crate::config::set_auth(&text, &user, &hash))
+            .and_then(|text| {
+                crate::fsutil::write_atomic(&app.config_path, text.as_bytes())?;
+                Ok(())
+            })
+    };
+    if let Err(e) = saved {
+        tracing::error!(error = %e, "não consegui gravar a nova senha");
+        return fail(&format!("Não consegui gravar {}: {e}", app.config_path.display()));
+    }
+    *app.creds.write().unwrap() = (user.clone(), hash);
+    app.default_password.store(false, Ordering::SeqCst);
+    app.monitor.set_extra("default-password", None).await;
+    app.sessions.clear_fails(peer.ip());
+    app.sessions.keep_only(&ctx.token, &user);
+    tracing::info!(%user, "usuário/senha do painel alterados");
+    flash(&app, &ctx, true, "Usuário e senha atualizados.", "/")
+}
+
+// ---------- notificações ----------
+
+/// Fecha uma notificação (`id`) ou todas (`id=all`). Pelo app.js vem por fetch e responde 204;
+/// sem JavaScript, volta para a página.
+async fn dismiss_note(State(app): State<Shared>, ctx: Ctx, headers: axum::http::HeaderMap, Form(f): Form<Fields>) -> Response {
+    if let Err(r) = ctx.check_csrf(&f) {
+        return r;
+    }
+    let id = match field(&f, "id") {
+        "all" => None,
+        v => match v.parse() {
+            Ok(n) => Some(n),
+            Err(_) => return (StatusCode::BAD_REQUEST, "id inválido").into_response(),
+        },
+    };
+    app.monitor.dismiss(id).await;
+    if headers.get("x-requested-with").is_some_and(|v| v == "fetch") {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        Redirect::to("/").into_response()
     }
 }
