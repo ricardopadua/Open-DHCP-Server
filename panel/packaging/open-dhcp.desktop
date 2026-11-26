@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Open DHCP
+GenericName=DHCP Server Panel
+GenericName[pt]=Painel do servidor DHCP
+GenericName[pt_BR]=Painel do servidor DHCP
+GenericName[fr]=Panneau du serveur DHCP
+GenericName[es]=Panel del servidor DHCP
+Comment=Monitor and manage the Open DHCP Server
+Comment[pt_BR]=Acompanhe e administre o Open DHCP Server
+Exec=open-dhcp
+Icon=open-dhcp
+Terminal=false
+Categories=Network;System;Settings;
+Keywords=dhcp;network;lease;ip;
+StartupWMClass=open-dhcp
