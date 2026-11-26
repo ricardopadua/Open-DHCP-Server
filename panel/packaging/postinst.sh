@@ -16,6 +16,8 @@ mkdir -p /opt/opendhcp/log
 # leases do servidor: o painel lê e, ao liberar um lease, regrava o arquivo (a pasta continua do
 # root: o painel não cria nem troca arquivos nela)
 install -d -m 0750 /var/lib/opendhcp
+# (install -d não muda a permissão de uma pasta que já existe: até a 1.2.8 ela era 0700)
+chmod 0750 /var/lib/opendhcp || true
 chgrp "$G" /var/lib/opendhcp || true
 
 # 1.2.x guardava o estado dos leases em /tmp: passa a usar /var/lib/opendhcp. Os leases antigos
