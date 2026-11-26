@@ -81,6 +81,12 @@ depois da instalação, usuário `admin` e senha `admin`), o aplicativo Open DHC
 systemd. O servidor DHCP em si (`opendhcp`) não é iniciado sozinho: ajuste o `opendhcp.ini` pelo
 painel e clique em Iniciar.
 
+O `.AppImage` leva o `opendhcpd` e o `opendhcp-panel` dentro. Na primeira vez que roda num Linux
+sem o servidor instalado, o aplicativo oferece instalá-lo (pede a senha de administrador uma vez,
+via `pkexec`): `opendhcpd` em `/opt/opendhcp`, `opendhcp-panel` em `/usr/local/bin`, as duas units
+em `/etc/systemd/system` e a configuração em `/etc/opendhcp-panel`, sem sobrescrever arquivos que
+já existam. Quem preferir não instalar pode continuar com o painel embutido.
+
 ## Instalação manual
 
 ```sh

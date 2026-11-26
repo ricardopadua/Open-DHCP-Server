@@ -99,7 +99,10 @@ SPEC
 rpmbuild -bb --quiet --define "_topdir $RPMTOP" "$RPMTOP/SPECS/open-dhcp.spec"
 cp "$RPMTOP"/RPMS/x86_64/open-dhcp-"$V"-1*.x86_64.rpm "$OUT/open-dhcp-$V-linux-x86_64.rpm"
 
-# .AppImage (só o aplicativo; usa o painel do serviço instalado ou roda o painel embutido)
+# .AppImage: o aplicativo levando o servidor DHCP e o serviço do painel, que ele instala no
+# sistema (com a senha de administrador) quando eles ainda não estão instalados
+mkdir -p desktop/server
+install -m755 target/release/opendhcpd target/release/opendhcp-panel desktop/server/
 (cd desktop && rm -rf ../target/release/bundle/appimage && cargo bundle --release --format appimage)
 cp target/release/bundle/appimage/*.AppImage "$OUT/open-dhcp-$V-linux-x86_64.AppImage"
 

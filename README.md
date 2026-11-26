@@ -26,7 +26,7 @@ Get the latest version from [Releases](https://github.com/ricardopadua/Open-DHCP
 | `.deb` | Debian / Ubuntu |
 | `.rpm` | Fedora / RHEL / openSUSE |
 | `.tar.gz` | other Linux distributions (`sudo ./install.sh`) |
-| `.AppImage` | the desktop app only |
+| `.AppImage` | any Linux distribution: the desktop app, which offers to install the DHCP server on first run |
 | `.zip` | Windows 10/11 |
 
 The Linux packages install:
