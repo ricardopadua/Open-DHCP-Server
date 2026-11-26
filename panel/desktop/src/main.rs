@@ -316,6 +316,17 @@ fn server_outdated(payload: &Path) -> bool {
     differs(installed, &payload.join("opendhcp-panel")) || differs(Path::new("/opt/opendhcp/opendhcpd"), &payload.join("opendhcpd"))
 }
 
+/// A unit do painel existe (instalada por pacote, install.sh ou por este aplicativo). Sem ela, um
+/// panel.toml que sobrou de uma desinstalação não quer dizer que o servidor está instalado.
+fn service_installed() -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    ["/etc/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"]
+        .iter()
+        .any(|d| Path::new(d).join("opendhcp-panel.service").exists())
+}
+
 fn reachable(url: &str) -> bool {
     let host = url.trim_start_matches("http://").trim_start_matches("https://").split('/').next().unwrap_or("");
     host.to_socket_addrs()
@@ -565,7 +576,7 @@ fn resolve() -> Target {
         return Target::Url(url);
     }
     let system = Path::new(SYSTEM_CONFIG);
-    if arg("--config").is_none() && cfg!(unix) && system.exists() {
+    if arg("--config").is_none() && cfg!(unix) && system.exists() && service_installed() {
         let url = system_url();
         if cfg!(target_os = "linux") && server_payload().is_some_and(|p| server_outdated(&p)) {
             return Target::Update(url);
@@ -579,7 +590,7 @@ fn resolve() -> Target {
     // Linux sem o servidor: o aplicativo traz o servidor e oferece instalar (uma vez)
     if cfg!(target_os = "linux")
         && arg("--config").is_none()
-        && !system.exists()
+        && !service_installed()
         && server_payload().is_some()
         && !skip_marker().is_some_and(|m| m.exists())
     {
@@ -779,9 +790,22 @@ fn main() {
             Event::UserEvent(UserEvent::Ipc(action)) => match action.as_str() {
                 "start" => {
                     if let Some(url) = &offline_url {
-                        // pede a senha do sistema (polkit) para iniciar o serviço do painel
-                        let _ = std::process::Command::new("pkexec").args(["systemctl", "start", "opendhcp-panel"]).spawn();
-                        wait_reachable(url.clone(), proxy.clone());
+                        // pede a senha do sistema (polkit) para iniciar o serviço do painel; se o
+                        // systemctl falhar, mostra o erro na hora em vez de esperar o painel
+                        let (url, proxy) = (url.clone(), proxy.clone());
+                        std::thread::spawn(move || {
+                            let out = std::process::Command::new("pkexec")
+                                .args(["systemctl", "start", "opendhcp-panel.service"])
+                                .stderr(std::process::Stdio::piped())
+                                .output();
+                            let result = match out {
+                                Ok(o) if o.status.success() => wait_service(&url, 40),
+                                Ok(o) if matches!(o.status.code(), Some(126) | Some(127)) => Err("pkexec: autorização negada".to_string()),
+                                Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                                Err(e) => Err(format!("pkexec: {e}")),
+                            };
+                            let _ = proxy.send_event(UserEvent::Reachable(url, result));
+                        });
                     }
                 }
                 "retry" => {
@@ -850,6 +874,9 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Reachable(_, Err(e))) => {
                 let msg = serde_quote(&e);
+                // o botão volta ao texto original (estava "Iniciando…")
+                let label = serde_quote(tr("start"));
+                let _ = webview.evaluate_script(&format!("document.querySelectorAll('button.primary').forEach(b => {{ if (b.getAttribute('onclick') === \"go('start', this)\") b.textContent = {label}; }});"));
                 let _ = webview.evaluate_script(&format!(
                     "document.getElementById('msg').textContent = {msg}; document.querySelectorAll('button').forEach(b => b.disabled = false);"
                 ));
