@@ -76,40 +76,24 @@ impl App {
     }
 
     /// `Host` aceito: endereço IP literal (inclusive 127.0.0.1/[::1], com qualquer porta),
-    /// `localhost` ou um dos `allowed_hosts`. Nomes de outros domínios são recusados para que uma
-    /// página de fora não fale com o painel por DNS rebinding.
+    /// `localhost` ou um endereço de loopback. Qualquer outro nome é recusado, para que uma página
+    /// de fora não fale com o painel por DNS rebinding.
     fn host_allowed(&self, host: &str) -> bool {
         let host = host.trim().to_ascii_lowercase();
         if host.is_empty() {
             return false;
-        }
-        if self.cfg.allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
-            return true;
         }
         let name = if let Some(rest) = host.strip_prefix('[') {
             rest.split(']').next().unwrap_or("")
         } else {
             host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h).unwrap_or(&host)
         };
-        name == "localhost" || name.parse::<std::net::IpAddr>().is_ok()
+        name == "localhost" || name.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
     }
 
-    /// IP do cliente: o da conexão ou, se ela vier de um proxy confiável, o último endereço de
-    /// `X-Forwarded-For` que não seja de outro proxy confiável.
-    fn client_ip(&self, peer: SocketAddr, headers: &axum::http::HeaderMap) -> std::net::IpAddr {
-        let ip = peer.ip();
-        if !self.cfg.trusted_proxies.contains(&ip) {
-            return ip;
-        }
-        headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                v.rsplit(',')
-                    .filter_map(|p| p.trim().parse::<std::net::IpAddr>().ok())
-                    .find(|p| !self.cfg.trusted_proxies.contains(p))
-            })
-            .unwrap_or(ip)
+    /// IP do cliente: o da conexão (só local; `X-Forwarded-For` não é aceito).
+    fn client_ip(&self, peer: SocketAddr, _headers: &axum::http::HeaderMap) -> std::net::IpAddr {
+        peer.ip()
     }
 }
 
@@ -1637,16 +1621,9 @@ enum InstallKind {
     Bundled,
 }
 
-fn running_as_root() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(2).map(|u| u == "0")))
-        .unwrap_or(false)
-}
-
 fn install_kind() -> InstallKind {
-    // serviço do systemd (INVOCATION_ID) rodando como root
-    if !cfg!(target_os = "linux") || std::env::var_os("INVOCATION_ID").is_none() || !running_as_root() {
+    // só o painel que roda como serviço do systemd (INVOCATION_ID)
+    if !cfg!(target_os = "linux") || std::env::var_os("INVOCATION_ID").is_none() {
         return InstallKind::NotService;
     }
     if std::path::Path::new("/var/lib/dpkg/info/open-dhcp.list").exists() {
@@ -1655,27 +1632,12 @@ fn install_kind() -> InstallKind {
     if std::process::Command::new("rpm").args(["-q", "--quiet", "open-dhcp"]).status().is_ok_and(|s| s.success()) {
         return InstallKind::Rpm;
     }
-    InstallKind::Bundled
-}
-
-/// Script da desinstalação. Roda numa unit transitória (systemd-run), fora do painel: parar o
-/// serviço do painel não interrompe a remoção, e a unit não tem o isolamento do painel (que não
-/// pode gravar em /usr). Só caminhos fixos da instalação, nunca caminhos do panel.toml.
-fn uninstall_script(purge: bool) -> String {
-    let mut s = String::from(
-        "sleep 2\n\
-         systemctl disable --now opendhcp.service opendhcp-panel.service || true\n\
-         rm -f /etc/systemd/system/opendhcp.service /etc/systemd/system/opendhcp-panel.service \
-         /usr/lib/systemd/system/opendhcp.service /usr/lib/systemd/system/opendhcp-panel.service \
-         /usr/local/bin/opendhcp-panel /usr/bin/opendhcp-panel /usr/bin/open-dhcp /opt/opendhcp/opendhcpd \
-         /usr/share/applications/open-dhcp.desktop /usr/share/icons/hicolor/256x256/apps/open-dhcp.png\n\
-         rm -rf /usr/share/doc/open-dhcp\n",
-    );
-    if purge {
-        s.push_str("rm -rf /opt/opendhcp /etc/opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp-panel\n");
+    // a unit da desinstalação só vem nas instalações do aplicativo e do install.sh
+    if ["/etc/systemd/system", "/usr/lib/systemd/system"].iter().any(|d| std::path::Path::new(d).join("opendhcp-uninstall@.service").exists()) {
+        InstallKind::Bundled
+    } else {
+        InstallKind::NotService
     }
-    s.push_str("systemctl daemon-reload\nsystemctl reset-failed opendhcp.service opendhcp-panel.service 2>/dev/null || true\n");
-    s
 }
 
 fn maintenance_body(csrf: &str, kind: InstallKind, err: Option<&str>) -> Markup {
@@ -1795,10 +1757,8 @@ async fn maintenance_reset(
                 crate::fsutil::backup(ini, &app.cfg.backup_dir, app.cfg.backups_keep)?;
             }
             crate::fsutil::write_atomic(ini, crate::DEFAULT_INI.as_bytes())?;
-            match std::fs::remove_file(&app.cfg.state_file) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
+            // esvazia o arquivo (a pasta do estado é só do root; o painel só pode gravar o arquivo)
+            crate::leases::clear(&app.cfg.state_file)?;
             let text = std::fs::read_to_string(&app.config_path)?;
             let text = crate::config::set_auth(&text, "admin", &hash)?;
             crate::fsutil::write_atomic(&app.config_path, text.as_bytes())?;
@@ -1843,11 +1803,10 @@ async fn maintenance_uninstall(
         return fail(msg);
     }
     let purge = field(&f, "purge") == "1";
-    let unit = format!("opendhcp-uninstall-{}", chrono::Utc::now().timestamp());
-    let out = tokio::process::Command::new("systemd-run")
-        .args(["--unit", &unit, "--collect", "--no-block", "--quiet", "/bin/sh", "-c", &uninstall_script(purge)])
-        .output()
-        .await;
+    // o painel não é root: a remoção roda na unit opendhcp-uninstall@ (como root), que a regra do
+    // polkit deixa o painel iniciar; --no-block porque ela para o próprio painel
+    let unit = format!("opendhcp-uninstall@{}.service", if purge { "purge" } else { "keep" });
+    let out = tokio::process::Command::new("systemctl").args(["start", "--no-block", &unit]).output().await;
     match out {
         Ok(o) if o.status.success() => {}
         Ok(o) => return fail(&tf!("Não consegui iniciar a desinstalação: {}", String::from_utf8_lossy(&o.stderr).trim())),

@@ -7,7 +7,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Endereço do painel. Padrão só local; para acesso pela rede, use um proxy com HTTPS.
+    /// Endereço do painel. Só endereços locais (127.0.0.1, ::1): o painel não aceita acesso de
+    /// outro computador, nem por proxy.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
     /// `opendhcp.ini` usado pelo servidor (`-i`).
@@ -40,13 +41,11 @@ pub struct Config {
     pub secure_cookie: bool,
     #[serde(default = "default_session_hours")]
     pub session_hours: u64,
-    /// Nomes (com porta, se não for a 80/443) pelos quais o painel pode ser acessado, além de
-    /// 127.0.0.1/localhost/[::1] na porta do `listen`. Pedidos com outro `Host` são recusados
-    /// (proteção contra DNS rebinding). Ex.: ["painel.minharede.lan"] atrás de um proxy.
+    /// Ignorado desde a 1.2.9 (o painel só aceita localhost). Continua aceito para não quebrar
+    /// panel.toml antigos.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
-    /// Proxies reversos confiáveis: só deles o painel aceita o IP do cliente em
-    /// `X-Forwarded-For` (usado no bloqueio por tentativas de login e nos logs).
+    /// Ignorado desde a 1.2.9 (o painel só aceita localhost, sem proxy).
     #[serde(default)]
     pub trusted_proxies: Vec<std::net::IpAddr>,
     pub auth: Auth,
@@ -107,6 +106,12 @@ impl Config {
             .with_context(|| format!("não consegui ler {}", path.display()))?;
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("configuração inválida em {}", path.display()))?;
+        if !cfg.listen.ip().is_loopback() {
+            bail!(
+                "listen = \"{}\": o painel só aceita acesso deste computador; use 127.0.0.1 (ou [::1])",
+                cfg.listen
+            );
+        }
         if cfg.auth.username.trim().is_empty() {
             bail!("auth.username está vazio");
         }
@@ -172,5 +177,20 @@ mod tests {
         assert!(out.starts_with("# topo\nini_file"));
         assert!(out.contains("[service]\nstatus"));
         assert!(set_auth("ini_file = \"/x\"\n", "a", "b").is_err());
+    }
+    #[test]
+    fn listen_only_loopback() {
+        let dir = std::env::temp_dir().join(format!("opendhcp-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("panel.toml");
+        let base = "ini_file = \"/x.ini\"\n[auth]\nusername = \"admin\"\npassword_hash = \"$argon2id$a\"\n";
+        for (listen, ok) in [("127.0.0.1:8067", true), ("[::1]:8067", true), ("0.0.0.0:8067", false), ("192.168.0.5:8067", false)] {
+            std::fs::write(&path, format!("listen = \"{listen}\"\n{base}")).unwrap();
+            assert_eq!(Config::load(&path).is_ok(), ok, "{listen}");
+        }
+        // opções antigas de rede continuam aceitas (ignoradas) para não quebrar panel.toml antigos
+        std::fs::write(&path, format!("allowed_hosts = [\"x.lan\"]\ntrusted_proxies = [\"10.0.0.1\"]\n{base}")).unwrap();
+        assert!(Config::load(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

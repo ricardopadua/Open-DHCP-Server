@@ -469,6 +469,12 @@ fn create_ini_as_admin(ini: &Path) -> Result<(), String> {
 const UNIT_DHCP: &str = include_str!("../../opendhcp.service");
 const UNIT_PANEL: &str = include_str!("../../opendhcp-panel.service");
 const PANEL_EXAMPLE: &str = include_str!("../../panel.example.toml");
+// regra do polkit (o que o painel, sem root, pode pedir ao systemd), desinstalação pela página
+// Manutenção e a configuração do sistema comum a todos os instaladores
+const POLKIT_RULE: &str = include_str!("../../packaging/opendhcp-panel.rules");
+const UNIT_UNINSTALL: &str = include_str!("../../packaging/opendhcp-uninstall@.service");
+const UNINSTALL_SH: &str = include_str!("../../packaging/uninstall.sh");
+const SETUP_SH: &str = include_str!("../../packaging/postinst.sh");
 
 /// Pasta com `opendhcpd` e `opendhcp-panel` que vêm com o aplicativo (dentro do AppImage em
 /// usr/lib/open-dhcp/server; ao lado do executável em desenvolvimento).
@@ -516,6 +522,10 @@ fn install_server(payload: &Path) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join("\n");
         put("panel.toml", toml.as_bytes())?;
+        put("opendhcp-panel.rules", POLKIT_RULE.as_bytes())?;
+        put("opendhcp-uninstall@.service", UNIT_UNINSTALL.as_bytes())?;
+        put("uninstall.sh", UNINSTALL_SH.as_bytes())?;
+        put("setup.sh", SETUP_SH.as_bytes())?;
 
         let tar = std::process::Command::new("tar")
             .args(["-c", "-C"])
@@ -531,22 +541,23 @@ fn install_server(payload: &Path) -> Result<(), String> {
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 tar -x --no-same-owner -C "$T" -f -
 install -d -m 0755 /opt/opendhcp /opt/opendhcp/log
-install -d -m 0700 /var/lib/opendhcp /var/lib/opendhcp-panel
 install -m 0755 "$T/opendhcpd" /opt/opendhcp/opendhcpd
 install -D -m 0755 "$T/opendhcp-panel" /usr/local/bin/opendhcp-panel
 install -D -m 0644 "$T/opendhcp.service" /etc/systemd/system/opendhcp.service
 install -D -m 0644 "$T/opendhcp-panel.service" /etc/systemd/system/opendhcp-panel.service
+install -D -m 0644 "$T/opendhcp-uninstall@.service" /etc/systemd/system/opendhcp-uninstall@.service
+install -D -m 0755 "$T/uninstall.sh" /usr/libexec/opendhcp/uninstall.sh
+install -D -m 0644 "$T/opendhcp-panel.rules" /etc/polkit-1/rules.d/50-opendhcp-panel.rules
 [ -e /opt/opendhcp/opendhcp.ini ] || install -m 0644 "$T/opendhcp.ini" /opt/opendhcp/opendhcp.ini
 [ -e /etc/opendhcp-panel/panel.toml ] || install -D -m 0600 "$T/panel.toml" /etc/opendhcp-panel/panel.toml
 # SELinux: contexto padrão dos caminhos (os arquivos vieram de uma pasta temporária)
 if command -v restorecon >/dev/null 2>&1; then
-  restorecon -R /opt/opendhcp /usr/local/bin/opendhcp-panel /etc/opendhcp-panel /var/lib/opendhcp /var/lib/opendhcp-panel /etc/systemd/system/opendhcp.service /etc/systemd/system/opendhcp-panel.service || true
+  restorecon -R /opt/opendhcp /usr/local/bin/opendhcp-panel /usr/libexec/opendhcp /etc/opendhcp-panel /etc/polkit-1/rules.d/50-opendhcp-panel.rules \
+    /etc/systemd/system/opendhcp.service /etc/systemd/system/opendhcp-panel.service /etc/systemd/system/opendhcp-uninstall@.service || true
 fi
-systemctl daemon-reload
-systemctl enable opendhcp-panel.service
-# numa atualização, os serviços passam a usar os binários novos
-systemctl restart opendhcp-panel.service
-systemctl try-restart opendhcp.service
+# usuário do painel (sem root), permissões e serviços: o mesmo passo dos pacotes .deb/.rpm
+sh "$T/setup.sh"
+command -v restorecon >/dev/null 2>&1 && restorecon -R /var/lib/opendhcp /var/lib/opendhcp-panel || true
 "#;
         let mut child = std::process::Command::new("pkexec")
             .args(["sh", "-c", script])

@@ -17,6 +17,11 @@ trap 'rm -rf "$WORK"' EXIT
 rm -rf "$OUT"; mkdir -p "$OUT"
 echo "== Open DHCP $V"
 
+# ---------- dependências ----------
+# Nenhuma release sai com biblioteca de vulnerabilidade conhecida (base RustSec).
+command -v cargo-audit >/dev/null 2>&1 || { echo "falta o cargo-audit: cargo install --locked cargo-audit" >&2; exit 1; }
+cargo audit
+
 # ---------- Linux ----------
 cargo build --release -p opendhcp-panel -p open-dhcp
 # O código original usa campos de 1 byte como "array flexível" (strcpy além do tamanho declarado):
@@ -41,6 +46,7 @@ install -dm755 "$ROOT/opt/opendhcp/log"
 install -Dm600 "$WORK/panel.toml" "$ROOT/etc/opendhcp-panel/panel.toml"
 install -Dm644 opendhcp.service "$ROOT/usr/lib/systemd/system/opendhcp.service"
 install -Dm644 opendhcp-panel.service "$ROOT/usr/lib/systemd/system/opendhcp-panel.service"
+install -Dm644 packaging/opendhcp-panel.rules "$ROOT/usr/share/polkit-1/rules.d/50-opendhcp-panel.rules"
 install -Dm644 packaging/open-dhcp.desktop "$ROOT/usr/share/applications/open-dhcp.desktop"
 install -Dm644 desktop/assets/icon.png "$ROOT/usr/share/icons/hicolor/256x256/apps/open-dhcp.png"
 install -Dm644 README.md "$ROOT/usr/share/doc/open-dhcp/README.md"
@@ -61,7 +67,7 @@ Release: 1
 Summary: Open DHCP Server with a web panel and a desktop app
 License: GPL-2.0-only
 URL: https://github.com/ricardopadua/Open-DHCP-Server
-Requires: webkit2gtk4.1, gtk3
+Requires: webkit2gtk4.1, gtk3, polkit
 
 %description
 opendhcpd (Open DHCP Server, 64-bit build), the opendhcp-panel service (real-time
@@ -90,6 +96,7 @@ fi
 %config(noreplace) %attr(600,root,root) /etc/opendhcp-panel/panel.toml
 /usr/lib/systemd/system/opendhcp.service
 /usr/lib/systemd/system/opendhcp-panel.service
+/usr/share/polkit-1/rules.d/50-opendhcp-panel.rules
 /usr/share/applications/open-dhcp.desktop
 /usr/share/icons/hicolor/256x256/apps/open-dhcp.png
 %doc /usr/share/doc/open-dhcp/README.md
@@ -111,6 +118,10 @@ TD="open-dhcp-$V-linux-x86_64"
 mkdir -p "$WORK/$TD"
 cp -a "$ROOT"/. "$WORK/$TD/"
 cp packaging/install.sh "$WORK/$TD/install.sh"; chmod 755 "$WORK/$TD/install.sh"
+cp packaging/postinst.sh "$WORK/$TD/setup.sh"
+# desinstalação pela página Manutenção (só nesta instalação e na do aplicativo)
+install -Dm755 packaging/uninstall.sh "$WORK/$TD/usr/libexec/opendhcp/uninstall.sh"
+install -Dm644 packaging/opendhcp-uninstall@.service "$WORK/$TD/usr/lib/systemd/system/opendhcp-uninstall@.service"
 tar -czf "$OUT/$TD.tar.gz" -C "$WORK" --owner=0 --group=0 "$TD"
 
 # ---------- Windows ----------

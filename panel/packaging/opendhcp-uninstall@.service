@@ -1,0 +1,8 @@
+# Desinstalação pedida pela página Manutenção do painel (instância keep ou purge). Só vem nas
+# instalações feitas pelo aplicativo (AppImage) ou pelo install.sh; .deb/.rpm usam o gerenciador.
+[Unit]
+Description=Remove o Open DHCP (%i)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/opendhcp/uninstall.sh %i

@@ -106,10 +106,8 @@ pub async fn start(path: PathBuf) -> anyhow::Result<Server> {
         }
     }
     let listen = cfg.listen;
-    if !listen.ip().is_loopback() && !cfg.secure_cookie {
-        tracing::warn!(
-            "o painel está aberto na rede sem HTTPS (secure_cookie = false); prefira 127.0.0.1 atrás de um proxy com TLS"
-        );
+    if !cfg.allowed_hosts.is_empty() || !cfg.trusted_proxies.is_empty() {
+        tracing::warn!("allowed_hosts e trusted_proxies são ignorados: o painel só aceita acesso deste computador");
     }
     let history_path = cfg.data_dir.join("history.sqlite");
     let history = match history::History::open(&history_path) {

@@ -75,6 +75,11 @@ the LAN, without authentication, in a process that runs as root. This fork fixes
 - **Build:** PIE, stack protector, full RELRO and non-executable stack. The systemd units drop
   every root capability except binding port 67.
 
+The web panel runs as its own unprivileged user (`opendhcp-panel`) and only accepts connections
+from the same computer (`127.0.0.1`). A polkit rule lets it start, stop and restart the DHCP
+service and nothing else. Release builds fail if `cargo audit` finds a known vulnerability in
+the panel's dependencies.
+
 Replication between two servers is still not authenticated: only enable `[REPLICATION_SERVERS]`
 on a trusted network. Regression tests for malformed packets are in
 [`tests/opendhcpd/`](tests/opendhcpd/README.md).

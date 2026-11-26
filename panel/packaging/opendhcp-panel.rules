@@ -1,0 +1,18 @@
+// Open DHCP: o painel roda como o usuário opendhcp-panel, sem root. Pelo systemd ele só pode
+// iniciar, parar e reiniciar o servidor DHCP e pedir a própria desinstalação (que só existe nas
+// instalações feitas pelo aplicativo ou pelo install.sh). Qualquer outro pedido segue as regras
+// normais do sistema, que negam para um usuário de serviço.
+polkit.addRule(function (action, subject) {
+  if (action.id !== "org.freedesktop.systemd1.manage-units" || subject.user !== "opendhcp-panel") {
+    return polkit.Result.NOT_HANDLED;
+  }
+  var unit = action.lookup("unit");
+  var verb = action.lookup("verb");
+  if (unit === "opendhcp.service" && (verb === "start" || verb === "stop" || verb === "restart")) {
+    return polkit.Result.YES;
+  }
+  if ((unit === "opendhcp-uninstall@keep.service" || unit === "opendhcp-uninstall@purge.service") && verb === "start") {
+    return polkit.Result.YES;
+  }
+  return polkit.Result.NOT_HANDLED;
+});

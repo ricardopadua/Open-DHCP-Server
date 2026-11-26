@@ -110,6 +110,15 @@ pub fn remove_mac(path: &Path, mac: &str) -> std::io::Result<usize> {
     Ok(removed)
 }
 
+/// Apaga todos os leases gravados (esvazia o arquivo; não existir já é "vazio").
+pub fn clear(path: &Path) -> std::io::Result<()> {
+    match crate::fsutil::open_existing_for_write(path) {
+        Ok(f) => f.sync_all(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Monta um registro no mesmo formato do servidor (usado nos testes).
 #[cfg(test)]
 pub fn encode(index: u16, mac: &str, ip: Ipv4Addr, expiry: i64, hostname: &str) -> [u8; RECORD_SIZE] {
