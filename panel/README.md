@@ -53,11 +53,34 @@ Quando algo muda, cada navegador conectado em `/live` recebe só os blocos da p�
 já renderizados (e escapados) no servidor. Se a conexão cair, a página tenta de novo sozinha e
 volta para o login se a sessão tiver expirado.
 
-## Instalação
+## Aplicativo Open DHCP (janela própria)
+
+O painel também abre como aplicativo, numa janela própria (sem navegador): **Open DHCP**, no
+menu de aplicativos. Ele usa o WebView do sistema (WebKitGTK no Linux, WebView2 no Windows).
+
+- **Linux, com o pacote instalado:** a janela mostra o painel do serviço `opendhcp-panel`. Se o
+  serviço estiver parado, aparece um botão para iniciá-lo (pede a senha do sistema).
+- **Windows, ou Linux sem o serviço:** o painel roda dentro do próprio aplicativo, com a
+  configuração em `<pasta de configuração do usuário>/OpenDHCP/panel.toml`, criada na primeira
+  vez.
+- `open-dhcp --url http://servidor:8067/` abre um painel em outro endereço;
+  `open-dhcp --config arquivo.toml` usa outra configuração.
+- Arquivos baixados (ex.: exportar reservas em CSV) vão para a pasta Downloads.
+
+## Pacotes
+
+`packaging/build-release.sh` gera, em `dist/release-<versão>/`, os pacotes `.deb`, `.rpm`,
+`.AppImage`, `.tar.gz` (Linux) e `.zip` (Windows). Os pacotes Linux instalam o `opendhcpd`
+(compilado em 64 bits) em `/opt/opendhcp`, o painel como serviço (`opendhcp-panel`, já ligado
+depois da instalação, usuário `admin` e senha `admin`), o aplicativo Open DHCP e as units do
+systemd. O servidor DHCP em si (`opendhcp`) não é iniciado sozinho: ajuste o `opendhcp.ini` pelo
+painel e clique em Iniciar.
+
+## Instalação manual
 
 ```sh
 cargo build --release
-sudo install -m 755 target/release/opendhcp-panel /usr/local/bin/
+sudo install -m 755 target/release/opendhcp-panel /usr/bin/
 sudo mkdir -p /etc/opendhcp-panel
 sudo cp panel.example.toml /etc/opendhcp-panel/panel.toml
 echo admin | opendhcp-panel hash-password   # cole o hash em [auth] password_hash

@@ -34,7 +34,12 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn run(argv: &[String]) -> Result<std::process::Output, String> {
     let (prog, args) = argv.split_first().ok_or_else(|| t("comando vazio").to_string())?;
-    let fut = Command::new(prog).args(args).kill_on_drop(true).output();
+    let mut cmd = Command::new(prog);
+    cmd.args(args).kill_on_drop(true);
+    // Windows: sem abrir uma janela de console a cada consulta (o painel roda sem console)
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let fut = cmd.output();
     match tokio::time::timeout(TIMEOUT, fut).await {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => Err(tf!("não consegui executar {}: {}", prog, e)),

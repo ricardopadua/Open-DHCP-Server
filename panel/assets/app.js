@@ -297,7 +297,7 @@
     }
   });
 
-  // ---------- calendário (flatpickr, mesmo visual do NCI) ----------
+  // ---------- calendário (flatpickr com tema próprio) ----------
   // O valor enviado continua ISO (aaaa-mm-dd); só o texto exibido segue o idioma.
   const FP_LOCALES = {
     pt: {
