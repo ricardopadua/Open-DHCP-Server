@@ -19,7 +19,10 @@ echo "== Open DHCP $V"
 
 # ---------- Linux ----------
 cargo build --release -p opendhcp-panel -p open-dhcp
-g++ -O2 -include time.h -include pthread.h -o target/release/opendhcpd ../opendhcpd.cpp -lpthread
+# O código original usa campos de 1 byte como "array flexível" (strcpy além do tamanho declarado):
+# sem _FORTIFY_SOURCE, senão a checagem de tamanho abortaria o servidor nesses pontos.
+g++ -O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wno-stringop-overflow -include time.h -include pthread.h \
+  -o target/release/opendhcpd ../opendhcpd.cpp -lpthread
 
 # panel.toml do pacote: senha inicial "admin" (o painel avisa até ser trocada)
 HASH="$(printf 'admin\n' | target/release/opendhcp-panel hash-password 2>/dev/null)"
@@ -90,7 +93,7 @@ fi
 SPEC
 } > "$RPMTOP/SPECS/open-dhcp.spec"
 rpmbuild -bb --quiet --define "_topdir $RPMTOP" "$RPMTOP/SPECS/open-dhcp.spec"
-cp "$RPMTOP"/RPMS/x86_64/open-dhcp-"$V"-1.*.x86_64.rpm "$OUT/open-dhcp-$V-linux-x86_64.rpm"
+cp "$RPMTOP"/RPMS/x86_64/open-dhcp-"$V"-1*.x86_64.rpm "$OUT/open-dhcp-$V-linux-x86_64.rpm"
 
 # .AppImage (só o aplicativo; usa o painel do serviço instalado ou roda o painel embutido)
 (cd desktop && rm -rf ../target/release/bundle/appimage && cargo bundle --release --format appimage)
